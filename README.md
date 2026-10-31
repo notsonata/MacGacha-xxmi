@@ -46,6 +46,16 @@ This only changes MacGacha itself, not any system setting. The first launch can 
 
 ## Screenshots
 
+Captured from the installed MacGacha XXMI app.
+
+![HSR selected in MacGacha with the XXMI wrench in the sidebar](assets/screenshots/hsr-xxmi-launcher.png)
+
+| XXMI setup and injection | Mod library and folder location |
+|---|---|
+| ![Installed SRMI package and opt-in injection controls](assets/screenshots/xxmi-setup.png) | ![StelleSportswear in the mod library with its relocated folder](assets/screenshots/xxmi-mod-library.png) |
+
+### Other launcher features
+
 ![Launcher with the current Honkai: Star Rail banner, ready to play](assets/screenshots/launcher.jpg)
 
 | Install | Downloading |
