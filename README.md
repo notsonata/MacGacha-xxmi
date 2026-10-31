@@ -1,6 +1,6 @@
 # MacGacha — universal launcher for HoYoverse games on Apple Silicon
 
-> 🧪 **XXMI fork.** HSR mod support builds on MacGacha 0.1.3. Fork release binaries are published separately from upstream. See [fork releases](https://github.com/notsonata/MacGacha-xxmi/releases). The first fork release is `v0.1.3-xxmi.2`.
+> 🧪 **XXMI fork.** HSR mod support builds on MacGacha 0.1.3. Fork release binaries are published separately from upstream. See [fork releases](https://github.com/notsonata/MacGacha-xxmi/releases). The current regular release is [v0.1.3-xxmi.2](https://github.com/notsonata/MacGacha-xxmi/releases/tag/v0.1.3-xxmi.2).
 
 A native macOS launcher for **Genshin Impact**, **Honkai: Star Rail** and **Zenless Zone Zero** on Apple Silicon. It aims to provide reliable resumable downloads, file verification, and managed Wine / DXMT / D3DMetal runtimes.
 
@@ -24,11 +24,22 @@ This release bundles these components:
 
 The launcher uses only the standalone injector core and the hook runner for XXMI. The full XXMI Launcher is not shipped or opened. Source pins, patch order, rebuild dependencies, package generation and independent XXMI package updates are documented in [compat/xxmi/README.md](compat/xxmi/README.md).
 
-Injection is supported only for **Honkai: Star Rail Global** on the `d3dmetal-wine11.20-gptk4.0b3` runtime bundle. Genshin, ZZZ, Mainland China editions, DXMT and other Wine bundles keep their normal launch path and do not get the injection option in this version.
+Injection is supported only for **Honkai: Star Rail Global** on the `d3dmetal-wine11.20-gptk4.0b3` runtime bundle. Genshin, ZZZ and Mainland China editions keep their normal launch path. For HSR, an enabled injection setting on another backend or Wine bundle blocks launch until injection is disabled or the supported runtime is selected.
 
 This is a first mod-support release. It was validated with one PoC mod on a live session. That does not establish account safety or support for every mod. The packaged launch flow itself has not been live tested. Treat mod use as potentially bannable, and see [Is it safe?](#is-it-safe).
 
 Generated payload archives and personal mods are never committed. A distributable build must supply and verify the package locally, and release assets carry the generated archive. See [compat/xxmi/README.md](compat/xxmi/README.md) for the release process. App updates use a fork-specific feed, but that feed is disabled until the fork owner provisions signing keys. Update manually from this fork's releases until then.
+
+## Downloads
+
+The [current regular release](https://github.com/notsonata/MacGacha-xxmi/releases/tag/v0.1.3-xxmi.2) has two uploaded downloads:
+
+| Download | Purpose |
+|---|---|
+| [MacGacha-0.1.3-xxmi.2.dmg](https://github.com/notsonata/MacGacha-xxmi/releases/download/v0.1.3-xxmi.2/MacGacha-0.1.3-xxmi.2.dmg) | App installer, with the verified XXMI package already bundled. |
+| [XXMI-HSR-2.4.3-macgacha.1.zip](https://github.com/notsonata/MacGacha-xxmi/releases/download/v0.1.3-xxmi.2/XXMI-HSR-2.4.3-macgacha.1.zip) | Complete standalone package for independent installation. Extract it and select its `XXMI-HSR-2.4.3-macgacha.1` folder using **XXMI → Import Package…**. |
+
+The standalone package contains `manifest.json`, `hsr-srmi.zip`, instructions and notices. It is different from a mod ZIP, which belongs in the panel's mod importer. [Corresponding XXMI source, raw package files and checksums](https://github.com/notsonata/MacGacha-xxmi/releases/tag/xxmi-2.4.3-macgacha.1) are kept on a separate compatibility release. GitHub also shows two automatic app-source links on the app release. Screenshots are stored in this repository, not attached as downloads.
 
 ## Install
 
@@ -71,6 +82,7 @@ Captured from the installed MacGacha XXMI app.
 ## Roadmap
 
 **Done**
+- **HSR XXMI integration.** Offline verified setup, opt-in injection, per-mod switches, folder/ZIP import, search, Finder actions and a movable library. Enabled mods are copied into each new launch snapshot.
 - **Display choice.** Each game can open on a chosen monitor, with the main display as the default and fallback.
 - **Progress timing.** An estimated time remaining for downloads and full verification, elapsed time for phases without a percentage, and a signal when progress is taking longer than usual.
 - **Automatic updates** (Sparkle, upstream). Upstream MacGacha has **Check for Updates…** in the app menu and a switch in Settings, and it asks before downloading or installing. In this fork the feed is fork-specific and disabled until the fork owner provisions signing keys, so **Check for Updates…** and the switch stay inactive. Update manually from [this fork's releases](https://github.com/notsonata/MacGacha-xxmi/releases) meanwhile, and Settings links to them.
@@ -83,12 +95,12 @@ Captured from the installed MacGacha XXMI app.
 - **One-click setup.** When a game needs runtimes, "Set Up…" lists exactly what it needs for its settings (the Wine bundle and its compatibility component) and installs it all in one go, asking for Apple's terms only when D3DMetal is part of it. The Runtimes panel stays available for picking versions by hand.
 - **Per-game settings:** graphics backend, frame limit (Off, 30, 60, 90 or 120), Retina mode, DirectX 12 for Zenless Zone Zero, a switch for the compatibility workaround, and Unlock 120 FPS for Honkai: Star Rail, which sets the game's own saved frame rate before each launch.
 - **Recovery.** If the launcher crashes or is quit while a game runs, it finds the game again on restart and restores everything once the game exits. Quitting during a game asks first.
-- **Privacy.** Games run in their own Wine prefix with no links to your Desktop, Documents or other home folders. Session logs stay on your Mac and can be turned off in Settings.
+- **Privacy.** Games use separate Wine prefixes with isolated shell-folder links. This is not a security sandbox: the managed injection path requires Wine's Z: mapping to the host filesystem. Session logs stay on your Mac and can be turned off in Settings.
 - **Languages.** The interface comes in English, Simplified and Traditional Chinese, Japanese, Korean, Russian, Ukrainian, German, French, Spanish, Portuguese, Indonesian, Thai and Vietnamese. It follows your Mac's language order, or you pick one in Settings. Game news and art follow the interface language (English for Ukrainian, which HoYoPlay doesn't offer). Changing the language restarts MacGacha, and a running download pauses and picks up again by itself.
 
-**Verified by hand (macOS 27.0.1)**
+**Upstream gameplay measurements (macOS 27.0.1)**
 
-All three games start and play with a community anti-cheat workaround. None of them needs `/etc/hosts` changes or administrator rights. Measured on a MacBook Pro 14″ with M5 Pro (48 GB) and on a base M5 (16 GB). Zenless Zone Zero used the same graphics preset on both.
+These inherited upstream measurements describe ordinary game launching, not XXMI acceptance for all games. All three games start and play with a community anti-cheat workaround. None of them needs `/etc/hosts` changes or administrator rights. Measured on a MacBook Pro 14″ with M5 Pro (48 GB) and on a base M5 (16 GB). Zenless Zone Zero used the same graphics preset on both.
 
 | Game | Default backend | M5 Pro, 48 GB | M5, 16 GB |
 |---|---|---|---|
@@ -118,7 +130,7 @@ Use at your own risk. Running these games under Wine already needs community ant
 
 Mod injection adds a separate risk on top of the Wine workarounds. It loads SRMI into the Star Rail process, which HoYoverse may treat as cheating, and that risk applies even when the Wine workaround itself works as intended. Injection is **off by default**. MacGacha asks you to acknowledge the ban risk before the first enable, and the XXMI panel shows the current setting before you launch. One tested PoC mod says nothing about account safety and does not mean every mod works.
 
-Without mod injection, MacGacha downloads games only from HoYoverse's official servers and verifies every file. It does not change the game process, never edits `/etc/hosts` and never asks for your password. Each game runs in its own Wine prefix with no access to your Desktop or Documents.
+Without mod injection, MacGacha downloads games only from HoYoverse's official servers and verifies every file. It does not change the game process, never edits `/etc/hosts` and never asks for your password. Each game uses its own Wine prefix with isolated shell-folder links, but Wine is not a security sandbox and host paths can remain accessible through Z:.
 
 Other optional features that change the game process, such as an FPS unlocker, are also **off by default**. Before you turn one on, MacGacha warns you about the extra ban risk.
 

@@ -11,6 +11,8 @@ Git by this directory; generated package files live under the ignored
 
 ## Package inputs
 
+The current package version is `2.4.3-macgacha.1`.
+
 - **XXMI Libraries v1.2.2**, repository
   <https://github.com/SpectrumQT/XXMI-Libs-Package>, tag `v1.2.2`, commit
   `a7847eae82aaac32175c9a7d199673d5c9323bcd`. Signed archive SHA-256
@@ -62,6 +64,25 @@ dumps, `d3dx_user.ini`, profile state or game files. The package builder rejects
 unexpected payload-root files, symlinks and traversal paths. Mods are imported
 separately by the app and never enter this compatibility archive.
 
+## Released artifacts
+
+The public `v0.1.3-xxmi.2` app release has exactly two uploaded assets:
+`MacGacha-0.1.3-xxmi.2.dmg`, which already contains the package under
+`Contents/Resources/XXMI/`, and `XXMI-HSR-2.4.3-macgacha.1.zip`. GitHub's
+automatic source archive links are not uploaded assets.
+
+The standalone ZIP wraps the verified package in a
+`XXMI-HSR-2.4.3-macgacha.1/` folder:
+
+- `manifest.json` and `hsr-srmi.zip` are the verified pair the app imports.
+- `README.txt` and `NOTICE.md` are the wrapper documentation and this notice.
+- `licenses/` contains the third-party license texts.
+
+The wrapper files are not part of the verified pair and are not covered by the
+manifest hashes. The raw `manifest.json` and `hsr-srmi.zip`, the GPL
+corresponding-source archive and its checksum sidecar are published on the
+separate `xxmi-2.4.3-macgacha.1` compatibility release.
+
 ## Runtime boundary
 
 The package is data for the app's own installer. The source tooling does not run
@@ -70,4 +91,4 @@ download or publish anything. The app-side installer resolves the actual
 selected D3DMetal runtime path and substitutes it for the neutral
 `[System] proxy_d3d11` value; no developer path is embedded in the package.
 
-The app bundles these notices in `Contents/Resources` (from the source folder `App/Resources/XXMILicenses`). Release assets provide the pinned upstream and patched corresponding source. System SDKs and compiler toolchains remain separately licensed inputs.
+The app bundles these notices in `Contents/Resources` (from the source folder `App/Resources/XXMILicenses`). The separate `xxmi-2.4.3-macgacha.1` compatibility release provides the raw package pair and the pinned upstream and patched corresponding source. System SDKs and compiler toolchains remain separately licensed inputs.

@@ -211,7 +211,8 @@ The app uses the standalone injector core and the MacGacha-authored runner, not 
 Upstream: https://github.com/SpectrumQT/XXMI-Libs-Package
 Runtime package: https://github.com/SpectrumQT/SRMI-Package
 Source pins, compatibility patches and notices: compat/xxmi in this fork's source release.
-The verified corresponding-source archive is attached to the GitHub release alongside the DMG.
+The verified corresponding-source archive and its checksum are on the separate compatibility release:
+https://github.com/notsonata/MacGacha-xxmi/releases/tag/xxmi-2.4.3-macgacha.1
 GPL, copyright notices and dependency license texts are bundled in Contents/Resources
 (3dmigoto-GPL-3.0.txt, 3dmigoto-COPYING.txt, 3dmigoto-AUTHORS.txt, DirectXTK-MIT.txt,
 PCRE2-BSD.txt, crc32c-Zlib.txt and NOTICE.md).
