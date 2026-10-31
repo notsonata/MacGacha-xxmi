@@ -6,7 +6,7 @@ import LauncherCore
 import SwiftUI
 
 enum Panel: String, Identifiable {
-    case runtimes, diagnostics
+    case runtimes, diagnostics, xxmi
     var id: Self { self }
 }
 
@@ -119,7 +119,7 @@ struct RootView: View {
         .ignoresSafeArea()
         .frame(minWidth: 960, minHeight: 540)
         .sheet(item: $panel) { panel in
-            PanelSheet(panel: panel)
+            PanelSheet(panel: panel, selectedID: game.id)
         }
         .sheet(item: $gameSheet) { sheet in
             switch sheet {
@@ -211,6 +211,7 @@ struct RootView: View {
 private struct PanelSheet: View {
     @Environment(\.dismiss) private var dismiss
     let panel: Panel
+    let selectedID: String
 
     var body: some View {
         NavigationStack {
@@ -218,6 +219,7 @@ private struct PanelSheet: View {
                 switch panel {
                 case .runtimes: RuntimesView()
                 case .diagnostics: DiagnosticsView()
+                case .xxmi: XXMIPanel(gameID: selectedID)
                 }
             }
             .toolbar {
@@ -227,7 +229,8 @@ private struct PanelSheet: View {
             }
         }
         .modifier(RuntimeFlowSheets(active: true))
-        .frame(minWidth: 620, idealWidth: 680, minHeight: 320, idealHeight: 380)
+        .frame(minWidth: panel == .xxmi ? 760 : 620, idealWidth: panel == .xxmi ? 820 : 680,
+            minHeight: panel == .xxmi ? 520 : 320, idealHeight: panel == .xxmi ? 620 : 380)
     }
 }
 

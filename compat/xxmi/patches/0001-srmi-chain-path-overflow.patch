@@ -1,0 +1,55 @@
+--- a/DirectX11/D3D11Wrapper.cpp
++++ b/DirectX11/D3D11Wrapper.cpp
+@@ -398,19 +398,44 @@
+ 		G->load_library_redirect = 0;
+ 
+ 		wchar_t sysDir[MAX_PATH] = {0};
+-		if (!GetModuleFileName(migoto_handle, sysDir, MAX_PATH)) {
++		ret = GetModuleFileName(migoto_handle, sysDir, ARRAYSIZE(sysDir));
++		if (!ret) {
+ 			LogInfo("GetModuleFileName failed\n");
+ 			DoubleBeepExit();
+ 		}
+-		wcsrchr(sysDir, L'\\')[1] = 0;
+-		wcscat(sysDir, G->CHAIN_DLL_PATH);
+-		if (LogFile)
++		if (ret < ARRAYSIZE(sysDir))
+ 		{
+-			char path[MAX_PATH];
+-			wcstombs(path, sysDir, MAX_PATH);
+-			LogInfo("trying to chain load %s\n", path);
++			wchar_t *lastSlash = wcsrchr(sysDir, L'\\');
++			if (lastSlash)
++			{
++				lastSlash[1] = 0;
++				const size_t directoryLength = wcslen(sysDir);
++				const size_t chainPathLength = wcslen(G->CHAIN_DLL_PATH);
++				if (chainPathLength < ARRAYSIZE(sysDir) - directoryLength)
++				{
++					wcscat_s(sysDir, ARRAYSIZE(sysDir), G->CHAIN_DLL_PATH);
++					if (LogFile)
++					{
++						char path[MAX_PATH];
++						wcstombs(path, sysDir, MAX_PATH);
++						LogInfo("trying to chain load %s\n", path);
++					}
++					hD3D11 = LoadLibrary(sysDir);
++				}
++				else
++				{
++					LogInfo("Resolved proxy path exceeds MAX_PATH; trying configured path directly\n");
++				}
++			}
++			else
++			{
++				LogInfo("GetModuleFileName returned a path without a directory separator\n");
++			}
+ 		}
+-		hD3D11 = LoadLibrary(sysDir);
++		else
++		{
++			LogInfo("SRMI module path exceeds MAX_PATH; trying configured path directly\n");
++		}
+ 		if (!hD3D11)
+ 		{
+ 			if (LogFile)

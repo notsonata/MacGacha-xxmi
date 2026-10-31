@@ -1,0 +1,196 @@
+{
+  "schemaVersion": 1,
+  "package": {
+    "id": "hsr-srmi",
+    "version": "2.4.3-macgacha.1",
+    "gameID": "starrail",
+    "supportedRuntimeBundleIDs": [
+      "d3dmetal-wine11.20-gptk4.0b3"
+    ],
+    "runnerPath": "hook-runner.exe",
+    "injectorPath": "3dmloader.dll",
+    "payloadPath": "payload/d3d11.dll",
+    "archiveName": "hsr-srmi.zip",
+    "manifestName": "manifest.json",
+    "license": "GPL-3.0-only"
+  },
+  "verifiedBinaries": {
+    "runner": {
+      "sha256": "7fde32d324bd1a9cd9a22995058157301b6470464ae46a9891040449c0ea565f",
+      "size": 10752,
+      "kind": "PE32+ x86-64 console executable",
+      "role": "Starts MacGacha's resolved StarRail command under 3dmloader's HookLibrary and keeps the hook armed until the game window is ready."
+    },
+    "injector": {
+      "sha256": "6713ad15447ed94467f6e72570b530b509f0c4e3c107c853c5e0c8bfeb8d02c4",
+      "size": 20480,
+      "kind": "PE32+ x86-64 DLL",
+      "role": "XXMI Libraries 3dmloader core injection API.",
+      "requiredExports": [
+        "DllMain",
+        "HookLibrary",
+        "Inject",
+        "StartProcess",
+        "UnhookLibrary",
+        "WaitForInjection"
+      ],
+      "expectedExports": [
+        "DllMain",
+        "HookLibrary",
+        "Inject",
+        "StartProcess",
+        "UnhookLibrary",
+        "WaitForInjection"
+      ]
+    },
+    "payload": {
+      "sha256": "52bac2fe330559cb2896b23214881f567ffe01eea79f38769d912ece39fdff77",
+      "size": 4957184,
+      "kind": "PE32+ x86-64 DLL",
+      "role": "SRMI 2.4.3 D3D11 proxy rebuilt from the pinned source and focused patches; user-confirmed working Honkai: Star Rail compatibility baseline."
+    },
+    "d3dcompiler": {
+      "sha256": "86110ac1986ff0e4f35e1a797a3ede99233c4a5bd12edacc6dd45750e22b4171",
+      "size": 4927168,
+      "kind": "PE32+ x86-64 DLL",
+      "role": "XXMI Libraries signed shader compiler companion DLL."
+    },
+    "textPrinterShader": {
+      "sha256": "c5071500a8fb3f9ce8f2f86464ef410a83c0074145d87fc761237ec04c93d313",
+      "size": 14333,
+      "kind": "HLSL source",
+      "role": "Numeric-literal TextPrinter shader accepted by Wine vkd3d."
+    }
+  },
+  "sourcePins": {
+    "xxmiLibsPackage": {
+      "repository": "https://github.com/SpectrumQT/XXMI-Libs-Package",
+      "tag": "v1.2.2",
+      "commit": "a7847eae82aaac32175c9a7d199673d5c9323bcd",
+      "archiveSHA256": "13034531d4855e05273d9fbaf18539ec390432950ebd5986a115e5d3e5d8e275",
+      "manifestSHA256": "63906652cd3f271ad6bbce678e73d264f3ee8bdf54e7e915d0d4cd134b8f4631",
+      "license": "GPL-3.0-only",
+      "provides": [
+        "3dmloader.dll",
+        "d3d11.dll base source",
+        "d3dcompiler_47.dll"
+      ]
+    },
+    "srmiPackage": {
+      "repository": "https://github.com/SpectrumQT/SRMI-Package",
+      "tag": "v2.4.3",
+      "archiveSHA256": "71a22e633a88c6b8bb2a154d91e2b91e18d8e8124575fe84e34d816f285f3a3e",
+      "license": "GPL-3.0-only",
+      "provides": [
+        "Core/SRMI runtime configuration and shaders",
+        "d3dx.ini baseline"
+      ]
+    },
+    "xxmiLauncher": {
+      "repository": "https://github.com/SpectrumQT/XXMI-Launcher",
+      "tag": "v2.4.9",
+      "role": "Hook/start/wait/verify lifecycle reference only; no launcher UI or package code is shipped.",
+      "license": "GPL-3.0-only"
+    },
+    "macgachaRunner": {
+      "path": "compat/xxmi/runner/srmi_hook_launcher.c",
+      "sha256": "9d2bc095be608ae40f137fdcbc5587a8f78de4dce833a92832f488759f80c89b",
+      "license": "GPL-3.0-only",
+      "role": "MacGacha-authored C runner source for the verified hook-runner.exe."
+    },
+    "patches": [
+      {
+        "path": "compat/xxmi/patches/0001-srmi-chain-path-overflow.patch",
+        "sha256": "36975d974a630baa6337eca7ca3c152bbb3175be64666608473c904576ced455",
+        "appliesTo": "XXMI Libraries v1.2.2 clean source"
+      },
+      {
+        "path": "compat/xxmi/patches/0002-srmi-dxgi-factory-reentrancy.patch",
+        "sha256": "b37ea86fd4ce3db4fc1fdbb75a70b3b14b6d6e91ef62817f2ceb75055617ffa7",
+        "appliesTo": "XXMI Libraries v1.2.2 clean source"
+      },
+      {
+        "path": "compat/xxmi/patches/0003-srmi-global-lock-initialization.patch",
+        "sha256": "78b2ec6150790f821f7ab7ba179515f65939bb6ebe62d0b642b581913450f584",
+        "appliesTo": "XXMI Libraries v1.2.2 clean source"
+      },
+      {
+        "path": "compat/xxmi/patches/0004-srmi-device-identity-fallback.patch",
+        "sha256": "79079ab2d73cc1d558672adb05774294aa123fd9c0d57d4aa5ab0a20de10821f",
+        "appliesTo": "XXMI Libraries v1.2.2 clean source"
+      },
+      {
+        "path": "compat/xxmi/patches/0005-srmi-resizebuffers-argument-diagnostic.patch",
+        "sha256": "195fcd3123e02ae2bf37155046fb76d4b46c752c89089ab5413c2168aac577ec",
+        "appliesTo": "XXMI Libraries v1.2.2 clean source"
+      },
+      {
+        "path": "compat/xxmi/patches/0006-srmi-resource-release-callback.patch",
+        "sha256": "5be55e910da0d29f73aa048ac914aa5d1b748fff3464a6a576a99eea9a17c787",
+        "appliesTo": "XXMI Libraries v1.2.2 clean source"
+      },
+      {
+        "path": "compat/xxmi/patches/0007-srmi-ngx-context-boundary.patch",
+        "sha256": "091434eb2238327b019adfd60aa70bd9ce499194125a37dd406bfebe1a883c1e",
+        "appliesTo": "base build after patches 0001-0006"
+      },
+      {
+        "path": "compat/xxmi/patches/0008-srmi-text-printer-vkd3d-all-literals.patch",
+        "sha256": "9742669f5ad116d9551fac4dbbb6332df7377cf3064113f85def8871aeba74b6",
+        "appliesTo": "SRMI 2.4.3 payload Core/SRMI/Shaders/TextPrinter.hlsl"
+      }
+    ]
+  },
+  "build": {
+    "cleanSourceTreeSHA256": "77862e4e0dfb8c3c938e44eff60b7aa4832dd88e2852eea8779c7a09772eaae7",
+    "cleanSourceTreeFileCount": 631,
+    "baseCandidateSHA256": "c563d40c29bd039b4b22219488996218cf5e87dc176020a728914ccc9e89dff1",
+    "basePatchedTreeSHA256": "26258343d4f1b1d9706840d08fa19e75c851e40ec4d87871fe8ec29287b342a7",
+    "finalCandidateSHA256": "52bac2fe330559cb2896b23214881f567ffe01eea79f38769d912ece39fdff77",
+    "plan": "compat/xxmi/build/payload-build-plan.json"
+  },
+  "sources": {
+    "xxmi-libs-package": {
+      "repository": "https://github.com/SpectrumQT/XXMI-Libs-Package",
+      "tag": "v1.2.2",
+      "commit": "a7847eae82aaac32175c9a7d199673d5c9323bcd",
+      "archiveSHA256": "13034531d4855e05273d9fbaf18539ec390432950ebd5986a115e5d3e5d8e275",
+      "manifestSHA256": "63906652cd3f271ad6bbce678e73d264f3ee8bdf54e7e915d0d4cd134b8f4631",
+      "license": "GPL-3.0-only"
+    },
+    "srmi-package": {
+      "repository": "https://github.com/SpectrumQT/SRMI-Package",
+      "tag": "v2.4.3",
+      "archiveSHA256": "71a22e633a88c6b8bb2a154d91e2b91e18d8e8124575fe84e34d816f285f3a3e",
+      "license": "GPL-3.0-only"
+    },
+    "macgacha-xxmi-runner": {
+      "path": "compat/xxmi/runner/srmi_hook_launcher.c",
+      "sha256": "9d2bc095be608ae40f137fdcbc5587a8f78de4dce833a92832f488759f80c89b",
+      "license": "GPL-3.0-only"
+    },
+    "patches": {
+      "directory": "compat/xxmi/patches",
+      "order": [
+        "0001-srmi-chain-path-overflow.patch",
+        "0002-srmi-dxgi-factory-reentrancy.patch",
+        "0003-srmi-global-lock-initialization.patch",
+        "0004-srmi-device-identity-fallback.patch",
+        "0005-srmi-resizebuffers-argument-diagnostic.patch",
+        "0006-srmi-resource-release-callback.patch",
+        "0007-srmi-ngx-context-boundary.patch",
+        "0008-srmi-text-printer-vkd3d-all-literals.patch"
+      ],
+      "sha256": {
+        "0001-srmi-chain-path-overflow.patch": "36975d974a630baa6337eca7ca3c152bbb3175be64666608473c904576ced455",
+        "0002-srmi-dxgi-factory-reentrancy.patch": "b37ea86fd4ce3db4fc1fdbb75a70b3b14b6d6e91ef62817f2ceb75055617ffa7",
+        "0003-srmi-global-lock-initialization.patch": "78b2ec6150790f821f7ab7ba179515f65939bb6ebe62d0b642b581913450f584",
+        "0004-srmi-device-identity-fallback.patch": "79079ab2d73cc1d558672adb05774294aa123fd9c0d57d4aa5ab0a20de10821f",
+        "0005-srmi-resizebuffers-argument-diagnostic.patch": "195fcd3123e02ae2bf37155046fb76d4b46c752c89089ab5413c2168aac577ec",
+        "0006-srmi-resource-release-callback.patch": "5be55e910da0d29f73aa048ac914aa5d1b748fff3464a6a576a99eea9a17c787",
+        "0007-srmi-ngx-context-boundary.patch": "091434eb2238327b019adfd60aa70bd9ce499194125a37dd406bfebe1a883c1e",
+        "0008-srmi-text-printer-vkd3d-all-literals.patch": "9742669f5ad116d9551fac4dbbb6332df7377cf3064113f85def8871aeba74b6"
+      }
+    }
+  }
+}

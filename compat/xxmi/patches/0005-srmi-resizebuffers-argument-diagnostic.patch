@@ -1,0 +1,17 @@
+--- a/DirectX11/HackerDXGI.cpp
++++ b/DirectX11/HackerDXGI.cpp
+@@ -718,9 +718,15 @@
+ 			G->mResolutionInfo.width, G->mResolutionInfo.height);
+ 	}
+ 
++	DWORD resize_thread_id = GetCurrentThreadId();
++	LogInfo("ResizeBuffers forward: thread=%lu wrapper=%p original=%p BufferCount=%u Width=%u Height=%u NewFormat=0x%08x Flags=0x%08x\n",
++		resize_thread_id, this, mOrigSwapChain1, BufferCount, Width, Height,
++		(UINT)NewFormat, SwapChainFlags);
+ 	HRESULT hr = mOrigSwapChain1->ResizeBuffers(BufferCount, Width, Height, NewFormat, SwapChainFlags);
+ 
++	LogInfo("ResizeBuffers original returns: thread=%lu original=%p hr=0x%08x\n",
++		resize_thread_id, mOrigSwapChain1, (UINT)hr);
+ 	LogInfo("  returns result = %x\n", hr);
+ 	return hr;
+ }

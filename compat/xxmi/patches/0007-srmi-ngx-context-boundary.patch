@@ -1,0 +1,427 @@
+diff -ruN orig/DirectX11/D3D11Wrapper.cpp new/DirectX11/D3D11Wrapper.cpp
+--- a/DirectX11/D3D11Wrapper.cpp	2026-10-31 17:15:23
++++ b/DirectX11/D3D11Wrapper.cpp	2026-10-31 17:15:41
+@@ -1,4 +1,5 @@
+ #include "D3D11Wrapper.h"
++#include "NGXContextHook.h"
+ 
+ #include "log.h"
+ #include "Globals.h"
+@@ -872,6 +873,7 @@
+ 	}
+ 
+ 	InitD311();
++	MaybeHookNGX();
+ 
+ 	LogInfo("\n\n *** D3D11CreateDevice called with\n");
+ 	LogInfo("    pAdapter = %p\n", pAdapter);
+@@ -994,6 +996,7 @@
+ 	DXGI_SWAP_CHAIN_DESC origSwapChainDesc;
+ 
+ 	InitD311();
++	MaybeHookNGX();
+ 
+ 	LogInfo("\n\n *** D3D11CreateDeviceAndSwapChain called with\n");
+ 	LogInfo("    pAdapter = %p\n", pAdapter);
+@@ -1089,10 +1092,15 @@
+ 
+ 	if (_wcsicmp(lpLibFileName, our_name) == 0)
+ 	{
++		HMODULE module;
++
+ 		LogInfoW(L"Hooked_LoadLibraryExW switching to original dll: %s to %s.\n",
+ 			lpLibFileName, fullPath);
+ 
+-		return fnOrigLoadLibraryExW(fullPath, hFile, dwFlags);
++		module = fnOrigLoadLibraryExW(fullPath, hFile, dwFlags);
++		if (module)
++			MaybeHookNGXModule(module);
++		return module;
+ 	}
+ 
+ 	// For this case, we want to see if it's the game loading d3d11 or nvapi directly
+@@ -1116,13 +1124,20 @@
+ 					lpLibFileName, fullPath);
+ 
+ 			HMODULE ret = fnOrigLoadLibraryExW(fullPath, hFile, dwFlags);
+-			if (ret)
++			if (ret) {
++				MaybeHookNGXModule(ret);
+ 				return ret;
++			}
+ 		}
+ 
+ 		LogInfoW(L"Replaced Hooked_LoadLibraryExW fallback for: %s to %s.\n", lpLibFileName, library);
+ 
+-		return fnOrigLoadLibraryExW(library, hFile, dwFlags);
++		{
++			HMODULE ret = fnOrigLoadLibraryExW(library, hFile, dwFlags);
++			if (ret)
++				MaybeHookNGXModule(ret);
++			return ret;
++		}
+ 	}
+ 
+ 	return NULL;
+@@ -1202,7 +1217,12 @@
+ 		hook_enabled = true;
+ 
+ 	// Normal unchanged case.
+-	return fnOrigLoadLibraryExW(lpLibFileName, hFile, dwFlags);
++	{
++		HMODULE module = fnOrigLoadLibraryExW(lpLibFileName, hFile, dwFlags);
++		if (module)
++			MaybeHookNGXModule(module);
++		return module;
++	}
+ }
+ 
+ // This callback proc allows us to hook into any application we need. It is
+diff -ruN orig/DirectX11/DLLMainHook.cpp new/DirectX11/DLLMainHook.cpp
+--- a/DirectX11/DLLMainHook.cpp	2026-10-31 17:15:23
++++ b/DirectX11/DLLMainHook.cpp	2026-10-31 17:15:41
+@@ -2,6 +2,7 @@
+ 
+ #include "HookedDXGI.h"
+ #include "D3D11Wrapper.h"
++#include "NGXContextHook.h"
+ #include "util_min.h"
+ #include "globals.h"
+ 
+@@ -355,6 +356,10 @@
+ 				return false;
+ 			if (FAILED(HookDXGIFactories()))
+ 				return false;
++
++			// Best effort: the NGX context shim must not be able to stop
++			// normal SRMI graphics interception from loading.
++			InstallNGXContextBoundary();
+ 
+ 			tls_idx = TlsAlloc();
+ 			if (tls_idx == TLS_OUT_OF_INDEXES)
+diff -ruN orig/DirectX11/DirectX11.vcxproj new/DirectX11/DirectX11.vcxproj
+--- a/DirectX11/DirectX11.vcxproj	2026-10-31 17:15:23
++++ b/DirectX11/DirectX11.vcxproj	2026-10-31 17:15:41
+@@ -50,6 +50,7 @@
+     <ClCompile Include="cursor.cpp" />
+     <ClCompile Include="D3D11Wrapper.cpp" />
+     <ClCompile Include="DLLMainHook.cpp" />
++    <ClCompile Include="NGXContextHook.cpp" />
+     <ClCompile Include="FrameAnalysis.cpp" />
+     <ClCompile Include="HackerContext.cpp" />
+     <ClCompile Include="HackerDevice.cpp" />
+@@ -84,6 +85,7 @@
+     <ClInclude Include="d3d11TokenizedProgramFormat.hpp" />
+     <ClInclude Include="D3D11Wrapper.h" />
+     <ClInclude Include="DLLMainHook.h" />
++    <ClInclude Include="NGXContextHook.h" />
+     <ClInclude Include="FrameAnalysis.h" />
+     <ClInclude Include="Globals.h" />
+     <ClInclude Include="HackerContext.h" />
+diff -ruN orig/DirectX11/DirectX11.vcxproj.filters new/DirectX11/DirectX11.vcxproj.filters
+--- a/DirectX11/DirectX11.vcxproj.filters	2026-10-31 17:15:23
++++ b/DirectX11/DirectX11.vcxproj.filters	2026-10-31 17:15:41
+@@ -3,6 +3,7 @@
+   <ItemGroup>
+     <ClCompile Include="D3D11Wrapper.cpp" />
+     <ClCompile Include="DLLMainHook.cpp" />
++    <ClCompile Include="NGXContextHook.cpp" />
+     <ClCompile Include="HackerContext.cpp" />
+     <ClCompile Include="HackerDevice.cpp" />
+     <ClCompile Include="Hunting.cpp" />
+@@ -48,6 +49,7 @@
+     <ClInclude Include="..\HLSLDecompiler\DecompileHLSL.h" />
+     <ClInclude Include="HookedDXGI.h" />
+     <ClInclude Include="DLLMainHook.h" />
++    <ClInclude Include="NGXContextHook.h" />
+     <ClInclude Include="..\log.h" />
+     <ClInclude Include="..\util.h" />
+     <ClInclude Include="..\version.h" />
+diff -ruN orig/DirectX11/NGXContextHook.cpp new/DirectX11/NGXContextHook.cpp
+--- a/DirectX11/NGXContextHook.cpp	1970-01-01 08:00:00
++++ b/DirectX11/NGXContextHook.cpp	2026-10-31 17:27:01
+@@ -0,0 +1,266 @@
++// NGX context boundary shim.
++//
++// SRMI wraps the immediate ID3D11DeviceContext in HackerContext so that normal
++// D3D11 interception keeps working. The native NGX implementation, however,
++// expects the original backend context and reads a private layout from it.
++// Passing a HackerContext to NVSDK_NGX_D3D11_CreateFeature therefore faults
++// inside the backend (observed in D3DMetal).
++//
++// This shim hooks the real nvngx.dll export bodies. That covers both static
++// imports and dynamically resolved GetProcAddress callers, because both call
++// the patched entry point. The hook unwraps the application context through
++// forwarded COM QueryInterface (the public COM contract; no private offsets),
++// keeps the unwrapped reference alive for the duration of the original call,
++// and then releases it. Normal SRMI graphics interception is untouched.
++
++#include "NGXContextHook.h"
++
++#include <d3d11_1.h>
++
++#include "Nektra/NktHookLib.h"
++#include "log.h"
++
++extern CNktHookLib cHookMgr;
++
++typedef unsigned int NVSDK_NGX_Result;
++enum NVSDK_NGX_Feature : int; // SDK enum has the Win32 32-bit representation
++
++struct NVSDK_NGX_Handle;
++struct NVSDK_NGX_Parameter;
++
++typedef void (__cdecl *PFN_NVSDK_NGX_ProgressCallback)(float, bool &);
++
++typedef NVSDK_NGX_Result (__cdecl *PFN_NVSDK_NGX_D3D11_CreateFeature)(
++	ID3D11DeviceContext *context,
++	NVSDK_NGX_Feature feature,
++	NVSDK_NGX_Parameter *parameters,
++	NVSDK_NGX_Handle **handle);
++
++typedef NVSDK_NGX_Result (__cdecl *PFN_NVSDK_NGX_D3D11_EvaluateFeature)(
++	ID3D11DeviceContext *context,
++	const NVSDK_NGX_Handle *handle,
++	const NVSDK_NGX_Parameter *parameters,
++	PFN_NVSDK_NGX_ProgressCallback callback);
++
++// Standard COM identity only. IUnknown is 00000000-0000-0000-C000-000000000046
++// and ID3D11DeviceContext is c0bfa96c-e089-44fb-8eaf-26f8796190da.
++static const GUID kNGXIIDIUnknown = {
++	0x00000000, 0x0000, 0x0000,
++	{ 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46 }
++};
++static const GUID kNGXIIDD3D11DeviceContext = {
++	0xc0bfa96c, 0xe089, 0x44fb,
++	{ 0x8e, 0xaf, 0x26, 0xf8, 0x79, 0x61, 0x90, 0xda }
++};
++
++static PFN_NVSDK_NGX_D3D11_CreateFeature fnOrigNGXCreateFeature = NULL;
++static PFN_NVSDK_NGX_D3D11_EvaluateFeature fnOrigNGXEvaluateFeature = NULL;
++
++// 0 = not installed, 1 = installing, 2 = installed.
++static volatile LONG gNGXHookState = 0;
++static volatile LONG gNGXLoadHooksState = 0;
++static volatile LONG gNGXUnwrapLogged = 0;
++
++static HMODULE (WINAPI *fnOrigLoadLibraryA)(LPCSTR) = LoadLibraryA;
++static HMODULE (WINAPI *fnOrigLoadLibraryW)(LPCWSTR) = LoadLibraryW;
++
++// Public COM unwrap contract:
++//   application context --QI(IUnknown)--> backend canonical IUnknown
++//   backend IUnknown    --QI(ID3D11DeviceContext)--> backend context
++//
++// For a plain backend context both calls return the same object with balanced
++// AddRef/Release. For HackerContext the first call is forwarded to the original
++// context, so the second call returns the backend context without ever reading
++// SRMI private state. On any failure the caller forwards the input unchanged.
++static __declspec(noinline) HRESULT UnwrapNGXContext(ID3D11DeviceContext *context,
++				ID3D11DeviceContext **unwrapped)
++{
++	IUnknown *unknown = NULL;
++	ID3D11DeviceContext *original = NULL;
++	HRESULT hr;
++
++	*unwrapped = NULL;
++	if (!context)
++		return E_POINTER;
++
++	hr = context->QueryInterface(kNGXIIDIUnknown, (void **)&unknown);
++	if (FAILED(hr) || !unknown)
++		return hr;
++
++	hr = unknown->QueryInterface(kNGXIIDD3D11DeviceContext, (void **)&original);
++	unknown->Release();
++	if (FAILED(hr) || !original)
++		return hr;
++
++	*unwrapped = original;
++	return S_OK;
++}
++
++static void LogFirstUnwrap(ID3D11DeviceContext *context,
++			   ID3D11DeviceContext *original)
++{
++	if (InterlockedCompareExchange(&gNGXUnwrapLogged, 1, 0) != 0)
++		return;
++	if (LogFile)
++		LogInfo("NGX context boundary: unwrapped SRMI context %p -> original %p\n",
++			context, original);
++}
++
++static NVSDK_NGX_Result __cdecl Hooked_NVSDK_NGX_D3D11_CreateFeature(
++	ID3D11DeviceContext *context,
++	NVSDK_NGX_Feature feature,
++	NVSDK_NGX_Parameter *parameters,
++	NVSDK_NGX_Handle **handle)
++{
++	ID3D11DeviceContext *original = NULL;
++	NVSDK_NGX_Result result;
++
++	if (!fnOrigNGXCreateFeature)
++		return 0xBAD00000u;
++
++	if (SUCCEEDED(UnwrapNGXContext(context, &original)) && original) {
++		if (original != context)
++			LogFirstUnwrap(context, original);
++		result = fnOrigNGXCreateFeature(original, feature, parameters, handle);
++		original->Release();
++		return result;
++	}
++
++	return fnOrigNGXCreateFeature(context, feature, parameters, handle);
++}
++
++static NVSDK_NGX_Result __cdecl Hooked_NVSDK_NGX_D3D11_EvaluateFeature(
++	ID3D11DeviceContext *context,
++	const NVSDK_NGX_Handle *handle,
++	const NVSDK_NGX_Parameter *parameters,
++	PFN_NVSDK_NGX_ProgressCallback callback)
++{
++	ID3D11DeviceContext *original = NULL;
++	NVSDK_NGX_Result result;
++
++	if (!fnOrigNGXEvaluateFeature)
++		return 0xBAD00000u;
++
++	if (SUCCEEDED(UnwrapNGXContext(context, &original)) && original) {
++		if (original != context)
++			LogFirstUnwrap(context, original);
++		result = fnOrigNGXEvaluateFeature(original, handle, parameters, callback);
++		original->Release();
++		return result;
++	}
++
++	return fnOrigNGXEvaluateFeature(context, handle, parameters, callback);
++}
++
++static HRESULT InstallNGXHook(HMODULE module, const char *name,
++			      void **trampoline, void *hook)
++{
++	LPVOID target;
++	SIZE_T hook_id;
++	DWORD error;
++
++	target = NktHookLibHelpers::GetProcedureAddress(module, name);
++	if (!target)
++		return E_FAIL;
++
++	hook_id = 0;
++	error = cHookMgr.Hook(&hook_id, trampoline, target, hook);
++	if (error != ERROR_SUCCESS) {
++		if (LogFile)
++			LogInfo("NGX context boundary: failed to hook %s (0x%lx)\n",
++				name, error);
++		return HRESULT_FROM_WIN32(error);
++	}
++
++	if (LogFile)
++		LogInfo("NGX context boundary: hooked %s at %p (trampoline %p)\n",
++			name, target, *trampoline);
++	return S_OK;
++}
++
++void MaybeHookNGXModule(HMODULE module)
++{
++	LONG state;
++
++	if (!module)
++		return;
++	if (gNGXHookState == 2)
++		return;
++
++	// Do not take the install lock for ordinary library loads. Only a module
++	// that actually exports the NGX entry point can contend here, so a
++	// concurrent non-NGX LoadLibrary call cannot delay a real nvngx hook.
++	if (!NktHookLibHelpers::GetProcedureAddress(
++			module, "NVSDK_NGX_D3D11_CreateFeature"))
++		return;
++
++	state = InterlockedCompareExchange(&gNGXHookState, 1, 0);
++	if (state != 0)
++		return;
++
++	if (!fnOrigNGXCreateFeature)
++		InstallNGXHook(module, "NVSDK_NGX_D3D11_CreateFeature",
++			(void **)&fnOrigNGXCreateFeature,
++			(void *)Hooked_NVSDK_NGX_D3D11_CreateFeature);
++
++	if (!fnOrigNGXEvaluateFeature)
++		InstallNGXHook(module, "NVSDK_NGX_D3D11_EvaluateFeature",
++			(void **)&fnOrigNGXEvaluateFeature,
++			(void *)Hooked_NVSDK_NGX_D3D11_EvaluateFeature);
++
++	InterlockedExchange(&gNGXHookState,
++		(fnOrigNGXCreateFeature && fnOrigNGXEvaluateFeature) ? 2 : 0);
++}
++
++void MaybeHookNGX()
++{
++	HMODULE module;
++
++	if (gNGXHookState == 2)
++		return;
++
++	module = NktHookLibHelpers::GetModuleBaseAddress(L"nvngx.dll");
++	if (!module)
++		module = NktHookLibHelpers::GetModuleBaseAddress(
++			L"nvngx-on-metalfx.dll");
++	if (module)
++		MaybeHookNGXModule(module);
++}
++
++static HMODULE WINAPI Hooked_NGXLoadLibraryA(LPCSTR name)
++{
++	HMODULE module = fnOrigLoadLibraryA(name);
++
++	if (module)
++		MaybeHookNGXModule(module);
++	return module;
++}
++
++static HMODULE WINAPI Hooked_NGXLoadLibraryW(LPCWSTR name)
++{
++	HMODULE module = fnOrigLoadLibraryW(name);
++
++	if (module)
++		MaybeHookNGXModule(module);
++	return module;
++}
++
++void InstallNGXContextBoundary()
++{
++	HMODULE kernel32;
++
++	if (InterlockedCompareExchange(&gNGXLoadHooksState, 1, 0) != 0)
++		return;
++
++	kernel32 = NktHookLibHelpers::GetModuleBaseAddress(L"kernel32.dll");
++	if (kernel32) {
++		InstallNGXHook(kernel32, "LoadLibraryA",
++			(void **)&fnOrigLoadLibraryA,
++			(void *)Hooked_NGXLoadLibraryA);
++		InstallNGXHook(kernel32, "LoadLibraryW",
++			(void **)&fnOrigLoadLibraryW,
++			(void *)Hooked_NGXLoadLibraryW);
++	}
++
++	MaybeHookNGX();
++}
+diff -ruN orig/DirectX11/NGXContextHook.h new/DirectX11/NGXContextHook.h
+--- a/DirectX11/NGXContextHook.h	1970-01-01 08:00:00
++++ b/DirectX11/NGXContextHook.h	2026-10-31 17:15:26
+@@ -0,0 +1,14 @@
++#pragma once
++
++#include <windows.h>
++
++// Installed once from DllMain. Hooks LoadLibraryA/W so a later nvngx.dll load
++// can be noticed, and tries to hook an already loaded nvngx.dll.
++void InstallNGXContextBoundary();
++
++// Hooks the NGX D3D11 CreateFeature/EvaluateFeature exports of the supplied
++// module if it is nvngx.dll. Safe to call for unrelated modules and idempotent.
++void MaybeHookNGXModule(HMODULE module);
++
++// Looks up an already loaded nvngx.dll and hooks it if present.
++void MaybeHookNGX();

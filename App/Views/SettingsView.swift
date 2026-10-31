@@ -46,13 +46,17 @@ struct SettingsView: View {
                     get: { model.automaticallyChecksForUpdates },
                     set: { model.automaticallyChecksForUpdates = $0 }
                 ))
+                .disabled(!SparkleUpdaterService.permitsForkUpdates(info: Bundle.main.infoDictionary ?? [:]))
+                Link("MacGacha XXMI Releases", destination: URL(string: "https://github.com/notsonata/MacGacha-xxmi/releases")!)
                 HStack {
                     Spacer()
                     Button("Check Now") { model.checkForUpdates() }
                         .disabled(!model.canCheckForUpdates)
                 }
             } footer: {
-                Text("MacGacha asks before it downloads an update and waits until no game or download is running to install it.")
+                Text(SparkleUpdaterService.permitsForkUpdates(info: Bundle.main.infoDictionary ?? [:])
+                    ? "MacGacha asks before downloading updates and waits until no game or operation is running."
+                    : "Use this fork’s releases for app updates. Automatic updates become available after the fork’s update signing is configured.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

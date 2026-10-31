@@ -1,0 +1,6 @@
+--- a/DirectX11/Overlay.cpp
++++ b/DirectX11/Overlay.cpp
+@@ -36,1 +36,2 @@
+-		InitializeCriticalSectionPretty(&lock);
++		// This namespace-scope object runs during DLL startup; avoid lock_names' cross-TU map here.
++		InitializeCriticalSection(&lock);

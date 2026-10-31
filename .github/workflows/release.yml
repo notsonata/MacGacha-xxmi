@@ -8,6 +8,10 @@ on:
         description: Release name, for example 0.1.1-beta. The numeric part must match MARKETING_VERSION in project.yml.
         required: true
         type: string
+      xxmi_package_tag:
+        description: Same-repository xxmi-* release containing verified manifest.json and hsr-srmi.zip assets.
+        required: true
+        type: string
 permissions:
   contents: read
 jobs:
@@ -20,6 +24,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       VERSION: ${{ inputs.version }}
+      XXMI_PACKAGE_TAG: ${{ inputs.xxmi_package_tag }}
     steps:
       - name: Check the branch and release name
         run: |
@@ -78,6 +83,19 @@ jobs:
           echo "MACGACHA_DERIVED_DATA_PATH=$RUNNER_TEMP/macgacha-release-dd" >> "$GITHUB_ENV"
       - name: Install XcodeGen
         run: brew install xcodegen
+
+      - name: Fetch the pinned XXMI compatibility package
+        run: |
+          set -euo pipefail
+          if [[ ! "$XXMI_PACKAGE_TAG" =~ ^xxmi-[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+            echo "error: XXMI package tag must start with xxmi-" >&2
+            exit 1
+          fi
+          mkdir -p App/Resources/XXMI
+          gh release download "$XXMI_PACKAGE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern manifest.json --pattern hsr-srmi.zip --dir App/Resources/XXMI
+          python3 -I scripts/xxmi-package.py verify \
+            --directory App/Resources/XXMI --pins compat/xxmi/source-pins.json
 
       - name: Build the disk image
         run: scripts/package-dmg.sh "$VERSION" out

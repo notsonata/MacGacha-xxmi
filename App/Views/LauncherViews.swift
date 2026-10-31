@@ -54,6 +54,7 @@ struct GameRail: View {
                 .accessibilityAddTraits(game.id == selectedID ? .isSelected : [])
             }
             Spacer(minLength: 24)
+            RailButton(title: "XXMI", symbol: "wrench") { panel = .xxmi }
             RailButton(title: "Runtimes", symbol: "square.stack.3d.up") { panel = .runtimes }
             RailButton(title: "Diagnostics", symbol: "stethoscope") { panel = .diagnostics }
             SettingsLink {

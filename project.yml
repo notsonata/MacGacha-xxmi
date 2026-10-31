@@ -51,6 +51,8 @@ targets:
         product: GameLibrary
       - package: LauncherKit
         product: Launch
+      - package: LauncherKit
+        product: ModSupport
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.lo7ted.macgacha
@@ -62,7 +64,7 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_FILE: App/Info.plist
         # Sparkle Ed25519 public key. The private key is the SPARKLE_ED_PRIVATE_KEY secret.
-        SPARKLE_PUBLIC_ED_KEY: "twDFIWAvlw1lBPC12GhgVqHMvPTpgYCUstqhuVJ/vPg="
+        SPARKLE_PUBLIC_ED_KEY: ""
         INFOPLIST_KEY_CFBundleDisplayName: MacGacha
         INFOPLIST_KEY_NSHumanReadableCopyright: "Copyright © 2026 deruta74. GPL-3.0."
         MARKETING_VERSION: 0.1.3
@@ -118,6 +120,8 @@ targets:
         product: GameLibrary
       - package: LauncherKit
         product: Launch
+      - package: LauncherKit
+        product: ModSupport
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.lo7ted.macgacha.tests

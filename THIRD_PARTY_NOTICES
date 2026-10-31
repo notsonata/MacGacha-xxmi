@@ -203,3 +203,15 @@ HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
 STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
 IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
+
+XXMI / SRMI compatibility payload
+---------------------------------
+XXMI Libraries v1.2.2 and SRMI v2.4.3 are based on SpectrumQT's GPL-3.0 3DMigoto fork.
+The app uses the standalone injector core and the MacGacha-authored runner, not the XXMI Launcher UI.
+Upstream: https://github.com/SpectrumQT/XXMI-Libs-Package
+Runtime package: https://github.com/SpectrumQT/SRMI-Package
+Source pins, compatibility patches and notices: compat/xxmi in this fork's source release.
+The verified corresponding-source archive is attached to the GitHub release alongside the DMG.
+GPL, copyright notices and dependency license texts are bundled in Contents/Resources
+(3dmigoto-GPL-3.0.txt, 3dmigoto-COPYING.txt, 3dmigoto-AUTHORS.txt, DirectXTK-MIT.txt,
+PCRE2-BSD.txt, crc32c-Zlib.txt and NOTICE.md).

@@ -9,6 +9,7 @@ import DownloadEngine
 import RuntimeManager
 import HoYoPlayAPI
 import GameLibrary
+import ModSupport
 
 @MainActor @Observable
 final class AppModel {
@@ -89,6 +90,13 @@ final class AppModel {
     private(set) var installRoot: URL
 
     @ObservationIgnored let paths: AppPaths
+    @ObservationIgnored let modSupportStore: ModSupportStore
+    var modSupportSnapshot: ModSupportSnapshot?
+    var modSupportViewState: ModSupportViewState = .loading
+    var modSupportActivity: ModSupportActivity?
+    var modSupportPackage: BundledXXMIPackage?
+    var modSupportError: String?
+    @ObservationIgnored var modSupportTask: Task<Void, Never>?
     // Observed: the setup sheet can open before startup loads it and must refresh when it arrives.
     var manifest: RuntimeManifest?
     @ObservationIgnored private let services: any RuntimeServices
@@ -207,6 +215,7 @@ final class AppModel {
         locale: Locale = .current,
         purgeable: any PurgeableSpaceProbe = SystemPurgeableSpaceProbe(),
         launchServices: any LaunchServices = PreviewLaunchServices(),
+        modSupportStore: ModSupportStore? = nil,
         launchPreferences: (any LaunchPreferencesPersistence)? = nil,
         launchWindows: LaunchWindowCoordinator = LaunchWindowCoordinator(),
         launchSleep: @escaping @Sendable () async throws -> Void = { try await ContinuousClock().sleep(for: .milliseconds(500)) },
@@ -233,6 +242,7 @@ final class AppModel {
         self.recoverySleep = recoverySleep
         self.launchServices = launchServices; self.launchWindows = launchWindows; self.launchSleep = launchSleep
         self.paths = paths; self.manifest = manifest; self.gameServices = gameServices; self.purgeableSpace = purgeable
+        self.modSupportStore = modSupportStore ?? ModSupportStore(paths: paths)
         self.services = services ?? LiveRuntimeServices(paths: paths)
         self.defaults = defaults; self.now = now
         let preferred = Self.persistedRegion(defaults: defaults, locale: locale)
@@ -316,7 +326,8 @@ final class AppModel {
         let log = EventLog(directory: paths.logs)
         let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
             ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Caches")
-        let launch = LiveLaunchServices(paths: paths, log: log)
+        let modSupport = ModSupportStore(paths: paths)
+        let launch = LiveLaunchServices(paths: paths, log: log, modSupportStore: modSupport)
         let art: [Region: any GameArtProviding] = Dictionary(uniqueKeysWithValues: Region.allCases.map {
             ($0, GameArtService(cacheDirectory: gameArtCacheDirectory(in: caches,
                 bundleIdentifier: Bundle.main.bundleIdentifier), region: $0,
@@ -331,7 +342,7 @@ final class AppModel {
         return AppModel(paths: paths, services: LiveRuntimeServices(paths: paths, log: log),
             artServices: art, eventsServices: events, gameServices: LiveGameServices(paths: paths, log: log, guard: launch),
             rosettaProbe: SystemRosettaProbe(), displayProbe: SystemDisplayProbe(),
-            displayNames: { ScreenDisplayNames.current() }, launchServices: launch, updater: SparkleUpdaterService(), relaunch: { arguments in
+            displayNames: { ScreenDisplayNames.current() }, launchServices: launch, modSupportStore: modSupport, updater: SparkleUpdaterService(), relaunch: { arguments in
                 let configuration = NSWorkspace.OpenConfiguration()
                 configuration.createsNewApplicationInstance = true; configuration.arguments = arguments
                 _ = try await NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: configuration)
@@ -380,6 +391,7 @@ final class AppModel {
         for task in eventsTasks.values { task.cancel() }
         eventsHydrationTask?.cancel(); eventsExpiryTask?.cancel(); eventsWindowTask?.cancel()
         gameTask?.cancel(); gameStartupTask?.cancel(); gameActivationTask?.cancel()
+        modSupportTask?.cancel()
     }
 
     func start() async {

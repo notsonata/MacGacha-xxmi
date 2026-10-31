@@ -31,6 +31,7 @@ public actor LaunchManager {
     private let clock: any Clock<Duration>
     private let displayProbe: any DisplayProbe
     private let proxyFactory: ProxyFactory
+    private let injectionPreparation: (any LaunchInjectionPreparing)?
     private let baseEnvironment: [String: String]
     private let journalFileOps: any FileOps
     private let hideHooks: LaunchFileHooks
@@ -77,7 +78,9 @@ public actor LaunchManager {
 
     public init(paths: AppPaths, runtimes: any LaunchRuntimeProviding, prefixes: any LaunchPrefixProviding,
         preparation: any LaunchPreparing, spawner: any ProcessSpawner, inspector: any ProcessInspector,
-        runner: any ProcessRunner, clock: any Clock<Duration>, log: EventLog? = nil, displayProbe: any DisplayProbe = SystemDisplayProbe()) {
+        runner: any ProcessRunner, clock: any Clock<Duration>, log: EventLog? = nil,
+        displayProbe: any DisplayProbe = SystemDisplayProbe(),
+        injectionPreparation: (any LaunchInjectionPreparing)? = nil) {
         self.eventLog = log ?? EventLog(directory: paths.logs)
         self.sessionLogWriter = Self.makeSessionLogWriter(beforeWrite: {})
         self.paths = paths; self.runtimes = runtimes; self.prefixes = prefixes; self.preparation = preparation
@@ -87,6 +90,7 @@ public actor LaunchManager {
         self.hideHooks = .none; self.beforeJournalRead = {}; self.beforeRecoveryRead = {}
         self.sessionProvenance = Self.currentSessionProvenance
         self.proxyFactory = { hosts, log in try await SessionProxy.start(blockedHosts: hosts, log: log) }
+        self.injectionPreparation = injectionPreparation
     }
 
     package init(paths: AppPaths, runtimes: any LaunchRuntimeProviding, prefixes: any LaunchPrefixProviding,
@@ -98,7 +102,8 @@ public actor LaunchManager {
         beforeRecoveryRead: @escaping @Sendable () async throws -> Void = {},
         recipeOverrides: [String: LaunchRecipe] = [:],
         sessionProvenance: @escaping @Sendable () throws -> (bootSessionUUID: String, sessionStartTime: UInt64) = LaunchManager.currentSessionProvenance,
-        beforeSessionLogWrite: @escaping @Sendable () throws -> Void = {}) {
+        beforeSessionLogWrite: @escaping @Sendable () throws -> Void = {},
+        injectionPreparation: (any LaunchInjectionPreparing)? = nil) {
         self.eventLog = log ?? EventLog(directory: paths.logs)
         self.sessionLogWriter = Self.makeSessionLogWriter(beforeWrite: beforeSessionLogWrite)
         self.paths = paths; self.runtimes = runtimes; self.prefixes = prefixes; self.preparation = preparation
@@ -107,6 +112,7 @@ public actor LaunchManager {
         self.recipeOverrides = recipeOverrides
         self.hideHooks = hideHooks; self.beforeJournalRead = beforeJournalRead; self.beforeRecoveryRead = beforeRecoveryRead
         self.sessionProvenance = sessionProvenance
+        self.injectionPreparation = injectionPreparation
     }
 
     private enum SessionLogWork: Sendable {
@@ -269,6 +275,10 @@ public actor LaunchManager {
                 note(context, "Star Rail frame-rate setting " + reason)
                 event("Star Rail frame-rate setting is unavailable", game: game.id, metadata: ["reason": reason])
             }
+            // The provider runs only after the prefix's idle preflight, so no
+            // Wine helper can be armed while MacGacha is still preparing it.
+            let injection = try await prepareInjection(game: game, settings: settings, bundle: bundle,
+                prefix: prefix, context: context)
             let original = context.session, log = context.log, hideHooks = hideHooks, beforeJournalRead = beforeJournalRead
             let (hiddenSnapshot, hideResult) = try await BlockingIO.run {
                 var snapshot = original
@@ -302,12 +312,19 @@ public actor LaunchManager {
                 note(context, "display=\(selection)")
                 event("Display selected", game: game.id, metadata: ["display": selection])
             }
+            let processLaunch: ResolvedLaunch
+            if let injection {
+                processLaunch = try injection.wrap(resolved,
+                    expectedGamePath: WinePath.windowsPath(for: recipe.executable.resolved(against: installRoot)))
+            } else {
+                processLaunch = resolved
+            }
             stage = .spawn; events.yield(.stage(stage)); note(context, "stage spawn")
             context.session.state = .spawning; try await persist(context.session)
             let spawner = spawner, output = context.log?.processOutput ?? .discard
             let process = try await BlockingIO.run {
-                try spawner.spawn(resolved.executable, arguments: resolved.arguments, environment: resolved.environment,
-                    currentDirectory: resolved.currentDirectory, output: output)
+                try spawner.spawn(processLaunch.executable, arguments: processLaunch.arguments, environment: processLaunch.environment,
+                    currentDirectory: processLaunch.currentDirectory, output: output)
             }
             context.ownedWrapper = process
             context.session.processes = [process]
@@ -349,6 +366,29 @@ public actor LaunchManager {
                 reservedGame = nil
             }
         }
+    }
+
+    private func prepareInjection(game: GameDefinition, settings: LaunchSettings, bundle: InstalledRuntimeBundle,
+        prefix: URL, context: Context) async throws -> LaunchInjection.Prepared? {
+        guard let injectionPreparation else { return nil }
+        let backend = LaunchInjection.backendD3D11URL(for: bundle)
+        guard let configuration = try await injectionPreparation.prepare(gameID: game.id,
+            runtimeBundleID: bundle.id.rawValue, backendD3D11: backend) else { return nil }
+        // An enabled configuration is all-or-nothing: never quietly launch an
+        // unsupported edition, backend or runtime without the requested mods.
+        guard LaunchInjection.supports(game: game, bundle: bundle, settings: settings) else {
+            throw LauncherError.io("XXMI injection supports only Global Honkai: Star Rail with the verified D3DMetal runtime")
+        }
+        let paths = paths
+        let prepared = try await BlockingIO.run {
+            try LaunchInjection.validate(configuration, paths: paths, prefix: prefix, bundle: bundle)
+        }
+        // The snapshot must be durable before any Wine helper can start.
+        context.session.injection = prepared.configuration
+        try await persist(context.session)
+        note(context, "injection snapshot prepared")
+        event("Injection prepared", game: game.id, metadata: ["runtimeBundle": bundle.id.rawValue])
+        return prepared
     }
 
     private func watch(game: String, executable: String) async {

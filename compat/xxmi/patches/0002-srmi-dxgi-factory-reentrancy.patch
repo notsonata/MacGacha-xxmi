@@ -1,0 +1,14 @@
+--- a/DirectX11/HookedDXGI.cpp
++++ b/DirectX11/HookedDXGI.cpp
+@@ -1046,6 +1046,11 @@
+ 
+ HRESULT __stdcall Hooked_CreateDXGIFactory2(UINT Flags, REFIID riid, void **ppFactory2)
+ {
++	if (get_tls()->hooking_quirk_protection) {
++		LogInfo("Hooking Quirk: Unexpected call back into CreateDXGIFactory2, passing through\n");
++		return fnOrigCreateDXGIFactory2(Flags, riid, ppFactory2);
++	}
++
+ 	LogInfo("*** Hooked_CreateDXGIFactory2 called with riid: %s\n", NameFromIID(riid).c_str());
+ 
+ 	// If this happens to be first call from the game, let's make sure to load

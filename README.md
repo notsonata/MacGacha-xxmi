@@ -1,6 +1,6 @@
 # MacGacha — universal launcher for HoYoverse games on Apple Silicon
 
-> 🧪 **Beta.** [MacGacha 0.1.3 beta](https://github.com/deruta74/MacGacha/releases/tag/v0.1.3-beta) is out: install, update and play all three games with one click. Expect rough edges, and please [report what you find](#feedback).
+> 🧪 **Experimental XXMI fork.** HSR mod support builds on MacGacha 0.1.3. Fork release binaries are published separately from upstream. See [fork releases](https://github.com/notsonata/MacGacha-xxmi/releases). The first fork release is `v0.1.3-xxmi.2`.
 
 A native macOS launcher for **Genshin Impact**, **Honkai: Star Rail** and **Zenless Zone Zero** on Apple Silicon. It aims to provide reliable resumable downloads, file verification, and managed Wine / DXMT / D3DMetal runtimes.
 
@@ -8,9 +8,31 @@ A native macOS launcher for **Genshin Impact**, **Honkai: Star Rail** and **Zenl
 
 Code and documentation in this repository may be written or modified with assistance from large language models (LLMs) and AI agents. The software is provided under the [GPL-3.0 license](LICENSE), as is, without warranty.
 
+## XXMI support in this fork
+
+This fork adds an HSR-only XXMI panel through the sidebar wrench. Injection is off by default and needs an explicit ban-risk acknowledgment the first time you enable it.
+
+The panel works offline. **Install**, **Repair** and **Update** use the compatibility package bundled in the app. **Import Package…** loads a verified local folder when you maintain your own build.
+
+The mod library supports per-mod switches, search, folder and ZIP import, drag and drop, a **Show in Finder** action and removal. Mods live in a library you can move with **Move Mods Folder…**. MacGacha creates a `MacGacha-HSR-Mods` folder at the new location, persists the choice, and copies and verifies before the old folder is removed. Keep that drive connected when importing mods or launching with injection enabled. Each launch uses an immutable snapshot of the enabled mods, so changes apply from the next launch and a running game keeps the mods it started with.
+
+This release bundles these components:
+
+- XXMI-Libs-Package v1.2.2, which provides the standalone `3dmloader.dll` injector core and the SRMI source base.
+- SRMI v2.4.3 as the mod runtime payload.
+- The MacGacha HSR compatibility package `2.4.3-macgacha.1`, which carries the focused SRMI patches and the MacGacha hook runner.
+
+The launcher uses only the standalone injector core and the hook runner for XXMI. The full XXMI Launcher is not shipped or opened. Source pins, patch order, rebuild dependencies, package generation and independent XXMI package updates are documented in [compat/xxmi/README.md](compat/xxmi/README.md).
+
+Injection is supported only for **Honkai: Star Rail Global** on the `d3dmetal-wine11.20-gptk4.0b3` runtime bundle. Genshin, ZZZ, Mainland China editions, DXMT and other Wine bundles keep their normal launch path and do not get the injection option in this version.
+
+This is a first mod-support release. It was validated with one PoC mod on a live session. That does not establish account safety or support for every mod. The packaged launch flow itself has not been live tested. Treat mod use as potentially bannable, and see [Is it safe?](#is-it-safe).
+
+Generated payload archives and personal mods are never committed. A distributable build must supply and verify the package locally, and release assets carry the generated archive. See [compat/xxmi/README.md](compat/xxmi/README.md) for the release process. App updates use a fork-specific feed, but that feed is disabled until the fork owner provisions signing keys. Update manually from this fork's releases until then.
+
 ## Install
 
-1. Download `MacGacha-<version>.dmg` from [Releases](https://github.com/deruta74/MacGacha/releases), open it and drag **MacGacha** to **Applications**.
+1. Download `MacGacha-<version>.dmg` from [fork releases](https://github.com/notsonata/MacGacha-xxmi/releases), open it and drag **MacGacha** to **Applications**.
 2. Open MacGacha. MacGacha isn't signed or notarized by Apple, so macOS says it can't verify the developer. Click **Done**.
 3. Open **System Settings → Privacy & Security**, scroll down to the MacGacha message and click **Open Anyway**, then confirm.
 
@@ -41,7 +63,7 @@ This only changes MacGacha itself, not any system setting. The first launch can 
 **Done**
 - **Display choice.** Each game can open on a chosen monitor, with the main display as the default and fallback.
 - **Progress timing.** An estimated time remaining for downloads and full verification, elapsed time for phases without a percentage, and a signal when progress is taking longer than usual.
-- **Automatic updates** (Sparkle). **Check for Updates…** in the MacGacha menu and a switch in Settings. MacGacha asks before it downloads an update and installs it only when no game, recovery or installation is running.
+- **Automatic updates** (Sparkle, upstream). Upstream MacGacha has **Check for Updates…** in the app menu and a switch in Settings, and it asks before downloading or installing. In this fork the feed is fork-specific and disabled until the fork owner provisions signing keys, so **Check for Updates…** and the switch stay inactive. Update manually from [this fork's releases](https://github.com/notsonata/MacGacha-xxmi/releases) meanwhile, and Settings links to them.
 - **Download engine.** Resumable, verified downloads with a crash-safe journal. A file reaches the game folder only after its hash matches. Files are downloaded and assembled in parallel, close to the full speed of a 2.5 Gbit link.
 - **Installing games** through HoYoverse's official delivery: install, update, verify and repair, voice packs, using an existing installation, and uninstall. Pause and resume work across app restarts. Free space is checked before and during the download. If macOS is still holding space (Time Machine snapshots, caches), the launcher says so instead of just "not enough space".
 - **Runtimes.** Wine, DXMT and D3DMetal are downloaded and kept side by side, so an update never breaks a working version. D3DMetal is installed only after you accept Apple's terms, or imported from an existing Game Porting Toolkit. The default DXMT build now uses CrossOver's Wine, which needs about 2.5× less CPU than the previous one.
@@ -78,22 +100,24 @@ DXMT works for every game and stays available as the open-source alternative. Th
 
 ## Feedback
 
-Found a bug or have an idea? [Open an issue](https://github.com/deruta74/MacGacha/issues) and say what you did and what happened, with your Mac model, macOS version, the game and its graphics backend. For problems with installing or launching, attach a diagnostics bundle: **Diagnostics** in the sidebar → **Export Diagnostic Bundle…**. It removes paths and tokens.
+Found a bug or have an idea? [Open an issue in this fork](https://github.com/notsonata/MacGacha-xxmi/issues) and say what you did and what happened, with your Mac model, macOS version, the game and its graphics backend. For problems with installing or launching, attach a diagnostics bundle: **Diagnostics** in the sidebar → **Export Diagnostic Bundle…**. It removes paths and tokens. For XXMI problems, say which mod you used and whether injection was already enabled before launch. Do not attach mod files themselves.
 
 ## Is it safe?
 
-Use at your own risk. To run under Wine, MacGacha uses community anti-cheat workarounds (jadeite, a Steam launcher shim). They may conflict with HoYoverse's Terms of Service, and a ban is possible, even if unlikely. If you're worried, try it first with a new free-to-play account.
+Use at your own risk. Running these games under Wine already needs community anti-cheat workarounds (jadeite, a Steam launcher shim). Those workarounds may conflict with HoYoverse's Terms of Service, and an account ban is possible. This project has no reliable ban-rate data and makes no claim that any setup is safe, undetectable or ban-free. If you are worried, try it first with a new free-to-play account.
 
-By default MacGacha downloads games only from HoYoverse's official servers and verifies every file. It doesn't change the game process, never edits `/etc/hosts` and never asks for your password. Each game runs in its own Wine prefix with no access to your Desktop or Documents.
+Mod injection adds a separate risk on top of the Wine workarounds. It loads SRMI into the Star Rail process, which HoYoverse may treat as cheating, and that risk applies even when the Wine workaround itself works as intended. Injection is **off by default**. MacGacha asks you to acknowledge the ban risk before the first enable, and the XXMI panel shows the current setting before you launch. One tested PoC mod says nothing about account safety and does not mean every mod works.
 
-Optional features that do change the game process, such as an FPS unlocker, are **off by default**. Before you turn one on, MacGacha warns you about the extra ban risk.
+Without mod injection, MacGacha downloads games only from HoYoverse's official servers and verifies every file. It does not change the game process, never edits `/etc/hosts` and never asks for your password. Each game runs in its own Wine prefix with no access to your Desktop or Documents.
+
+Other optional features that change the game process, such as an FPS unlocker, are also **off by default**. Before you turn one on, MacGacha warns you about the extra ban risk.
 
 ## Disclaimer
 
 MacGacha is an unofficial, community project. It is not affiliated with, endorsed by, or supported by HoYoverse (COGNOSPHERE) or Apple Inc. All game names and trademarks belong to their respective owners.
 
 - Using third-party launchers may conflict with HoYoverse's Terms of Service. Use at your own risk.
-- Under Wine, the games' anti-cheat stops them from starting. To launch them, MacGacha uses community workarounds: [jadeite](https://codeberg.org/mkrsym1/jadeite) for Star Rail, which also blocks one game server through a local proxy while the game runs, and a Steam launcher shim for Genshin Impact and Zenless Zone Zero. These workarounds may conflict with the Terms of Service and could lead to an account ban. By default, MacGacha doesn't change the game process. Optional features that do, such as an FPS unlocker, are off by default, and MacGacha warns you about the ban risk before you enable them.
+- Under Wine, the games' anti-cheat stops them from starting. To launch them, MacGacha uses community workarounds: [jadeite](https://codeberg.org/mkrsym1/jadeite) for Star Rail, which also blocks one game server through a local proxy while the game runs, and a Steam launcher shim for Genshin Impact and Zenless Zone Zero. These workarounds may conflict with the Terms of Service and could lead to an account ban. By default, MacGacha doesn't change the game process. Optional features that do, such as an FPS unlocker or XXMI mod injection, are off by default, and MacGacha warns you about the ban risk before you enable them. Mod injection is a separate risk from the Wine workarounds, and this project makes no claim about ban rates or undetectability.
 - The software is provided as is. The authors aren't responsible for account bans, data loss or any other damage.
 - D3DMetal and the Game Porting Toolkit are © Apple Inc. and licensed under Apple's terms. The launcher will ask you to accept those terms before it downloads the component.
 
@@ -101,6 +125,7 @@ MacGacha is an unofficial, community project. It is not affiliated with, endorse
 
 - [DXMT](https://github.com/3Shain/dxmt): a Metal-based Direct3D 11 translation layer, one of MacGacha's two graphics backends.
 - [jadeite](https://codeberg.org/mkrsym1/jadeite): the anti-cheat workaround MacGacha uses for Star Rail.
+- [XXMI-Launcher](https://github.com/SpectrumQT/XXMI-Launcher), [XXMI-Libs-Package](https://github.com/SpectrumQT/XXMI-Libs-Package) and [SRMI-Package](https://github.com/SpectrumQT/SRMI-Package): the upstream projects behind this fork's mod support.
 
 ## Special thanks
 
@@ -111,6 +136,7 @@ MacGacha is an unofficial, community project. It is not affiliated with, endorse
 - Valve for Proton, the source of our Steam launcher shim.
 - an-anime-team, whose bug tracker traced the Mainland China crash ([AAGL #572](https://github.com/an-anime-team/an-anime-game-launcher/issues/572)), and Michael Nelson for the upstream Wine fix ([MR 11824](https://gitlab.winehq.org/wine/wine/-/merge_requests/11824)).
 - Apple for D3DMetal and the Game Porting Toolkit.
+- SpectrumQT for XXMI, SRMI and the underlying 3DMigoto work this fork's mod support builds on.
 
 ## License
 

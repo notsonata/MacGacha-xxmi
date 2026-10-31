@@ -1,0 +1,224 @@
+--- a/DirectX11/HackerDevice.cpp
++++ b/DirectX11/HackerDevice.cpp
+@@ -13,6 +13,7 @@
+ #include "lock.h"
+ 
+ #include "HackerDevice.h"
++#include "D3D11DeviceIdentity.h"
+ #include "HookedDevice.h"
+ #include "FrameAnalysis.h"
+ 
+@@ -83,9 +84,13 @@
+ HackerDevice* lookup_hacker_device(IUnknown *unknown)
+ {
+ 	HackerDevice *ret = NULL;
+-	IUnknown *real_unknown = NULL;
++	IUnknown *device_key = NULL;
+ 	IDXGIObject *dxgi_obj = NULL;
+ 	DeviceMap::iterator i;
++	HRESULT iunknown_hr = E_FAIL;
++	HRESULT device_hr = E_FAIL;
++	HRESULT identity_hr;
++	BOOL used_device_fallback = FALSE;
+ 
+ 	// First, check if this is already a HackerDevice. This is a fast path,
+ 	// but is also kind of important in case we ever make
+@@ -107,22 +112,32 @@
+ 	// QueryInterface (and for convenience it's probably just been cast
+ 	// with C style casting), but we need the real IUnknown pointer with
+ 	// the COM guarantee that it will match for all interfaces of the same
+-	// object, so we call QueryInterface on it again to get this:
+-	if (FAILED(unknown->QueryInterface(IID_IUnknown, (void**)&real_unknown))) {
+-		// ... ehh, what? Shouldn't happen. Fatal.
+-		LogInfo("lookup_hacker_device: QueryInterface(IID_Unknown) failed\n");
++	// object, so we call QueryInterface on it again to get this. If a backend
++	// rejects IID_IUnknown, use the queried IID_ID3D11Device pointer as a
++	// noncanonical key; registration uses the same fallback strategy.
++	identity_hr = query_d3d11_device_identity(unknown, &device_key,
++	                                         &iunknown_hr, &device_hr,
++	                                         &used_device_fallback);
++	if (FAILED(identity_hr)) {
++		LogInfo("lookup_hacker_device: identity queries failed for %p: "
++		        "IID_IUnknown hr=0x%08x, IID_ID3D11Device hr=0x%08x\n",
++		        unknown, iunknown_hr, device_hr);
+ 		DoubleBeepExit();
+ 	}
++	if (used_device_fallback)
++		LogInfo("lookup_hacker_device: IID_IUnknown failed hr=0x%08x for %p; "
++		        "using queried IID_ID3D11Device key %p (hr=0x%08x)\n",
++		        iunknown_hr, unknown, device_key, device_hr);
+ 
+ 	EnterCriticalSectionPretty(&G->mCriticalSection);
+-	i = device_map.find(real_unknown);
++	i = device_map.find(device_key);
+ 	if (i != device_map.end()) {
+ 		ret = i->second;
+ 		ret->AddRef();
+ 	}
+ 	LeaveCriticalSection(&G->mCriticalSection);
+ 
+-	real_unknown->Release();
++	device_key->Release();
+ 
+ 	if (!ret) {
+ 		// Either not a d3d11 device, or something has handed us an
+@@ -154,8 +169,8 @@
+ 		// the above device_map lookup which relies on the COM identity
+ 		// rule in favour of this, since we expect this to always work:
+ 		if (SUCCEEDED(unknown->QueryInterface(IID_IDXGIObject, (void**)&dxgi_obj))) {
+-			UINT size;
+-			if (SUCCEEDED(dxgi_obj->GetPrivateData(IID_HackerDevice, &size, &ret))) {
++			if (SUCCEEDED(get_hacker_device_private_data(dxgi_obj, &IID_HackerDevice,
++			                                             (void**)&ret)) && ret) {
+ 				LogInfo("Notice: Unwrapped device and COM Identity violation, Found HackerDevice via GetPrivateData strategy\n");
+ 				ret->AddRef();
+ 			}
+@@ -163,37 +178,47 @@
+ 		}
+ 	}
+ 
+-	LogInfo("lookup_hacker_device(%p) IUnknown: %p HackerDevice: %p\n",
+-			unknown, real_unknown, ret);
++	LogInfo("lookup_hacker_device(%p) device key: %p HackerDevice: %p\n",
++	        unknown, device_key, ret);
+ 
+ 	return ret;
+ }
+ 
+ static IUnknown* register_hacker_device(HackerDevice *hacker_device)
+ {
+-	IUnknown *real_unknown = NULL;
++	IUnknown *device_key = NULL;
++	HRESULT iunknown_hr = E_FAIL;
++	HRESULT device_hr = E_FAIL;
++	HRESULT identity_hr;
++	BOOL used_device_fallback = FALSE;
++	ID3D11Device1 *orig_device = hacker_device->GetPassThroughOrigDevice1();
+ 
+-	// As above, our key is the real IUnknown gained through QueryInterface
+-	if (FAILED(hacker_device->GetPassThroughOrigDevice1()->QueryInterface(IID_IUnknown, (void**)&real_unknown))) {
+-		LogInfo("register_hacker_device: QueryInterface(IID_Unknown) failed\n");
++	identity_hr = query_d3d11_device_identity(orig_device, &device_key,
++	                                         &iunknown_hr, &device_hr,
++	                                         &used_device_fallback);
++	if (FAILED(identity_hr)) {
++		LogInfo("register_hacker_device: identity queries failed for Device1 %p: "
++		        "IID_IUnknown hr=0x%08x, IID_ID3D11Device hr=0x%08x\n",
++		        orig_device, iunknown_hr, device_hr);
+ 		DoubleBeepExit();
+ 	}
++	if (used_device_fallback)
++		LogInfo("register_hacker_device: IID_IUnknown failed hr=0x%08x for Device1 %p; "
++		        "using queried IID_ID3D11Device key %p (hr=0x%08x)\n",
++		        iunknown_hr, orig_device, device_key, device_hr);
+ 
+-	LogInfo("register_hacker_device: Registering IUnknown: %p -> HackerDevice: %p\n",
+-			real_unknown, hacker_device);
++	LogInfo("register_hacker_device: Registering device key %p -> HackerDevice %p\n",
++	        device_key, hacker_device);
+ 
+ 	EnterCriticalSectionPretty(&G->mCriticalSection);
+-	device_map[real_unknown] = hacker_device;
++	device_map[device_key] = hacker_device;
+ 	LeaveCriticalSection(&G->mCriticalSection);
+ 
+-	real_unknown->Release();
++	device_key->Release();
+ 
+-	// We return the IUnknown for convenience, since the HackerDevice needs
+-	// to store it so it can later unregister it after the real Device has
+-	// been Released and we will no longer be able to find it through
+-	// QueryInterface. We have dropped the refcount on this - dangerous I
+-	// know, but otherwise it will never be released.
+-	return real_unknown;
++	// Save the queried key pointer so it can later be removed after the
++	// original device has been Released.
++	return device_key;
+ }
+ 
+ static void unregister_hacker_device(HackerDevice *hacker_device)
+--- /dev/null
++++ b/DirectX11/D3D11DeviceIdentity.h
+@@ -0,0 +1,82 @@
++#pragma once
++
++#include <d3d11.h>
++#include <dxgi.h>
++
++static const IID SRMI_IID_IUNKNOWN =
++    {0x00000000, 0x0000, 0x0000, {0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}};
++static const IID SRMI_IID_ID3D11DEVICE =
++    {0xdb6f6ddb, 0xac77, 0x4e88, {0x82, 0x53, 0x81, 0x9d, 0xf9, 0xbb, 0xf1, 0x40}};
++
++// Query canonical IUnknown first. If a backend rejects it, consistently use
++// the queried ID3D11Device interface as a compatibility key on both sides.
++static inline HRESULT query_d3d11_device_identity(
++    IUnknown *source,
++    IUnknown **key,
++    HRESULT *iunknown_result,
++    HRESULT *device_result,
++    BOOL *used_device_fallback)
++{
++    if (!source || !key || !iunknown_result || !device_result || !used_device_fallback)
++        return E_POINTER;
++
++    *key = NULL;
++    *iunknown_result = E_PENDING;
++    *device_result = E_PENDING;
++    *used_device_fallback = FALSE;
++#ifdef __cplusplus
++    HRESULT result = source->QueryInterface(SRMI_IID_IUNKNOWN, (void **)key);
++#else
++    HRESULT result = source->lpVtbl->QueryInterface(source, &SRMI_IID_IUNKNOWN, (void **)key);
++#endif
++    *iunknown_result = result;
++    if (SUCCEEDED(result) && *key)
++        return result;
++    // Ignore any pointer a broken implementation writes when returning failure.
++    *key = NULL;
++
++    ID3D11Device *device = NULL;
++#ifdef __cplusplus
++    *device_result = source->QueryInterface(SRMI_IID_ID3D11DEVICE, (void **)&device);
++#else
++    *device_result = source->lpVtbl->QueryInterface(source, &SRMI_IID_ID3D11DEVICE,
++                                                     (void **)&device);
++#endif
++    if (SUCCEEDED(*device_result) && device) {
++#ifdef __cplusplus
++        *key = static_cast<IUnknown *>(device);
++#else
++        *key = (IUnknown *)device;
++#endif
++        *used_device_fallback = TRUE;
++        return *device_result;
++    }
++    *key = NULL;
++    return FAILED(*device_result) ? *device_result : E_NOINTERFACE;
++}
++
++static inline HRESULT get_hacker_device_private_data(
++    IDXGIObject *object,
++    const IID *key,
++    void **value)
++{
++    if (!object || !key || !value)
++        return E_POINTER;
++
++    *value = NULL;
++    UINT size = sizeof(*value);
++#ifdef __cplusplus
++    HRESULT result = object->GetPrivateData(*key, &size, value);
++#else
++    HRESULT result = object->lpVtbl->GetPrivateData(object, key, &size, value);
++#endif
++    if (FAILED(result)) {
++        *value = NULL;
++        return result;
++    }
++    if (size != sizeof(*value)) {
++        *value = NULL;
++        return E_INVALIDARG;
++    }
++    return result;
++}

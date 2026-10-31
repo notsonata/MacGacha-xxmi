@@ -41,14 +41,14 @@ class AppcastTests(unittest.TestCase):
         self.assertEqual(item.findtext("sparkle:minimumSystemVersion", namespaces=ns), "27.0")
         self.assertEqual(item.findtext("pubDate"), "Sun, 25 Oct 2026 12:00:00 GMT")
         self.assertEqual(item.findtext("sparkle:fullReleaseNotesLink", namespaces=ns),
-                         "https://github.com/deruta74/MacGacha/releases")
+                         "https://github.com/notsonata/MacGacha-xxmi/releases")
         self.assertIsNone(item.find("sparkle:releaseNotesLink", namespaces=ns))
         description = item.find("description")
         self.assertEqual(description.text, SAMPLE_NOTES)
         self.assertEqual(description.get(f"{{{ns['sparkle']}}}format"), "markdown")
         enclosure = item.find("enclosure")
         self.assertEqual(enclosure.get("url"),
-                         "https://github.com/deruta74/MacGacha/releases/download/v0.1.1-beta/MacGacha-0.1.1-beta.dmg")
+                         "https://github.com/notsonata/MacGacha-xxmi/releases/download/v0.1.1-beta/MacGacha-0.1.1-beta.dmg")
         self.assertEqual(enclosure.get("length"), "12345")
         self.assertEqual(enclosure.get("type"), "application/octet-stream")
         self.assertEqual(len(base64.b64decode(enclosure.get(f"{{{ns['sparkle']}}}edSignature"))), 64)

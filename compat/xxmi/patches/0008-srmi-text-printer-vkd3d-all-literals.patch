@@ -1,0 +1,116 @@
+--- a/Core/SRMI/Shaders/TextPrinter.hlsl
++++ b/Core/SRMI/Shaders/TextPrinter.hlsl
+@@ -106,7 +106,7 @@
+ 	// FIXME: Refactor
+ 
+ 	for (pos = 0; c = text[pos]; pos++) {
+-		if (c == ' ') {
++		if (c == 32u) {
+ 			space = pos;
+ 			space_x = cur_pos.x;
+ 		}
+@@ -115,7 +115,7 @@
+ 
+ 		// FIXME: Refactor
+ 
+-		if (c == '\n') {
++		if (c == 10u) {
+ 			textpos[gs].len = pos - start + 1;
+ 			max_x = max(max_x, cur_pos.x);
+ 
+@@ -206,7 +206,7 @@
+ 	}
+ 	textpos[gs].len = pos - start + 1;
+ 	max_x = max(max_x, cur_pos.x);
+-	if (text[pos-1] != '\n' && text[pos-1] != '\r') {
++	if (text[pos-1] != 10u && text[pos-1] != 13u) {
+ 		cur_pos.y -= char_dim.y;
+ 
+ 		if (params[0].h_align == 1) {
+@@ -277,7 +277,7 @@
+ 	float2 cdim = get_char_dimensions(c);
+ 	float2 texcoord;
+ 
+-	if (c >= ' ' && c < 0x7f) {
++	if (c >= 32u && c < 0x7f) {
+ 		gs2ps output;
+ 		float2 dim = float2(cdim.x, char_size.y) / resolution.xy * 2 * params[0].font_scale * ScreenScaling;
+ 		float texture_x_percent = cdim.x / char_size.x;
+@@ -327,13 +327,13 @@
+ 	int digit;
+ 
+ 	if (val < 0.0) {
+-		emit_char('-', ostream);
++		emit_char(45u, ostream);
+ 		val *= -1;
+ 	}
+ 
+ 	int e = 0;
+ 	if (val == 0) {
+-		emit_char('0', ostream);
++		emit_char(48u, ostream);
+ 		return;
+ 	}
+ 	e = log10(val);
+@@ -361,26 +361,26 @@
+ 	int scientific = 0;
+ 
+ 	if (workaround_broken_isnan(val)) {
+-		emit_char('N', ostream);
+-		emit_char('a', ostream);
+-		emit_char('N', ostream);
++		emit_char(78u, ostream);
++		emit_char(97u, ostream);
++		emit_char(78u, ostream);
+ 		return;
+ 	}
+ 
+ 	if (val < 0.0) {
+-		emit_char('-', ostream);
++		emit_char(45u, ostream);
+ 		val *= -1;
+ 	}
+ 
+ 	if (isinf(val)) {
+-		emit_char('i', ostream);
+-		emit_char('n', ostream);
+-		emit_char('f', ostream);
++		emit_char(105u, ostream);
++		emit_char(110u, ostream);
++		emit_char(102u, ostream);
+ 		return;
+ 	}
+ 
+ 	if (val == 0) {
+-		emit_char('0', ostream);
++		emit_char(48u, ostream);
+ 		return;
+ 	}
+ 
+@@ -393,7 +393,7 @@
+ 			significant++;
+ 			e--;
+ 		} else {
+-			emit_char('0', ostream);
++			emit_char(48u, ostream);
+ 			e = -1;
+ 		}
+ 	} else {
+@@ -409,7 +409,7 @@
+ 	}
+ 	if (!scientific && frac(val / pow(10, e + 1)) == 0)
+ 		return;
+-	emit_char('.', ostream);
++	emit_char(46u, ostream);
+ 	bool emitted = false;
+ 	while (!emitted || (significant < 3 && frac(val / pow(10, e + 1)))) {
+ 		digit = uint(val / pow(10, e)) % 10;
+@@ -420,7 +420,7 @@
+ 	}
+ 
+ 	if (scientific) {
+-		emit_char('e', ostream);
++		emit_char(101u, ostream);
+ 		emit_int(scientific, ostream);
+ 	}
+ }

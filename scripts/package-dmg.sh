@@ -26,6 +26,7 @@ if [[ "$project_version" != "$marketing_version" ]]; then
   exit 1
 fi
 
+python3 -I scripts/xxmi-package.py verify --directory App/Resources/XXMI --pins compat/xxmi/source-pins.json
 scripts/bootstrap.sh
 xcodebuild \
   -project MacGacha.xcodeproj \

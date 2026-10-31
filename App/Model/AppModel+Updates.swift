@@ -44,7 +44,7 @@ import LauncherCore
     var isBusyForUpdates: Bool {
         languageRestart != nil || isStarting || launchSlotOwner != nil || liveSessionGameName != nil ||
             launchStates.values.contains { if case .recoveryNeeded = $0 { true } else { false } } ||
-            isGameOperationRunning || isRuntimeOperationRunning || consentRequest != nil || importState != nil ||
+            isGameOperationRunning || isRuntimeOperationRunning || isModSupportBusy || consentRequest != nil || importState != nil ||
             runtimeSetupProgress.values.contains { if case .installing = $0 { true } else { false } }
     }
 }

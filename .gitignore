@@ -3,7 +3,7 @@
 .build/
 DerivedData/
 .swiftpm/
-docs/
+/docs/
 spike/
 
 # Steam shim build output (sources default to the ignored .build directory).
@@ -12,3 +12,14 @@ spike/
 /compat/steam-shim/out*/
 /compat/steam-shim/*.exe
 /compat/steam-shim/*.dll
+
+# Generated XXMI resource packages and local Python bytecode
+/App/Resources/XXMI/
+__pycache__/
+*.pyc
+
+# Local release outputs and temporary artifacts
+/out/
+/release/
+*.dmg
+*.dmg.sha256

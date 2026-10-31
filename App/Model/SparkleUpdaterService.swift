@@ -15,7 +15,10 @@ import Sparkle
 
     var automaticallyChecksForUpdates: Bool {
         get { automaticChecks }
-        set { controller.updater.automaticallyChecksForUpdates = newValue; automaticChecks = newValue }
+        set {
+            guard Self.permitsForkUpdates(info: Bundle.main.infoDictionary ?? [:]) else { return }
+            controller.updater.automaticallyChecksForUpdates = newValue; automaticChecks = newValue
+        }
     }
 
     static var isDebugBuild: Bool {
@@ -30,8 +33,20 @@ import Sparkle
         !debugBuild && !testBundleLoaded && environment["XCTestConfigurationFilePath"] == nil && environment["XCTestBundlePath"] == nil
     }
 
+    /// Fork builds must never fall back to upstream's feed or signing identity.
+    static func permitsForkUpdates(info: [String: Any]) -> Bool {
+        guard info["MacGachaForkUpdatesEnabled"] as? Bool == true,
+            let feed = info["SUFeedURL"] as? String, let url = URL(string: feed),
+            url.scheme == "https", url.host == "github.com",
+            url.path.hasPrefix("/notsonata/MacGacha-xxmi/releases/"),
+            let key = info["SUPublicEDKey"] as? String,
+            let decoded = Data(base64Encoded: key), decoded.count == 32,
+            key != "twDFIWAvlw1lBPC12GhgVqHMvPTpgYCUstqhuVJ/vPg=" else { return false }
+        return true
+    }
+
     func start(isBusy: @escaping @MainActor () -> Bool) {
-        guard gate == nil, Self.permitsStartup(environment: ProcessInfo.processInfo.environment,
+        guard gate == nil, Self.permitsForkUpdates(info: Bundle.main.infoDictionary ?? [:]), Self.permitsStartup(environment: ProcessInfo.processInfo.environment,
             testBundleLoaded: NSClassFromString("XCTestCase") != nil || NSClassFromString("XCTest.XCTestCase") != nil) else { return }
         gate = UpdateRelaunchGate(isBusy: isBusy)
         observations = [

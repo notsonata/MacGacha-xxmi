@@ -14,7 +14,7 @@ import unicodedata
 import xml.etree.ElementTree as ET
 
 SPARKLE = "http://www.andymatuschak.org/xml-namespaces/sparkle"
-RELEASES = "https://github.com/deruta74/MacGacha/releases"
+RELEASES = "https://github.com/notsonata/MacGacha-xxmi/releases"
 MAX_NOTES_BYTES = 64 * 1024
 
 

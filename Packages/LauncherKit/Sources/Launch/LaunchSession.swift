@@ -38,6 +38,9 @@ public struct LaunchSession: Codable, Equatable, Sendable {
     public var recoveryLocation: LaunchRecoveryLocation?
     /// Additive recovery context: never rediscover a different launch's log or executable.
     public var sessionLogURL: URL?
+    /// Additive injection snapshot for diagnostics and recovery. nil decodes
+    /// journals written before opt-in injection existed.
+    public var injection: LaunchInjectionConfiguration?
     public let gameExecutable: SafeRelativePath?
     public let createdAt: Date
 
@@ -47,7 +50,8 @@ public struct LaunchSession: Codable, Equatable, Sendable {
         hides: [HideEntry] = [], proxyPort: UInt16? = nil, createdAt: Date = Date(),
         sessionLogURL: URL? = nil, gameExecutable: SafeRelativePath? = nil, processGroupIDs: Set<Int32>? = nil,
         bootSessionUUID: String? = nil, sessionStartTime: UInt64? = nil, endLogged: Bool? = nil,
-        recoveryLocation: LaunchRecoveryLocation? = nil, startupPending: Bool? = nil) {
+        recoveryLocation: LaunchRecoveryLocation? = nil, startupPending: Bool? = nil,
+        injection: LaunchInjectionConfiguration? = nil) {
         self.sessionID = sessionID; self.game = game; self.installRoot = installRoot; self.installIdentity = installIdentity
         self.prefix = prefix; self.bundleID = bundleID; self.runtimeDigest = runtimeDigest; self.wineBinary = wineBinary
         self.wineserver = wineserver; self.componentIDs = componentIDs; self.recipeVersion = recipeVersion
@@ -58,6 +62,7 @@ public struct LaunchSession: Codable, Equatable, Sendable {
         self.endLogged = endLogged
         self.recoveryLocation = recoveryLocation
         self.startupPending = startupPending
+        self.injection = injection
     }
 
     func validate() throws {
@@ -67,6 +72,7 @@ public struct LaunchSession: Codable, Equatable, Sendable {
             guard url.isFileURL, url.path.hasPrefix("/"), !url.path.utf8.contains(0),
                 url.host == nil || url.host == "" || url.host == "localhost" else { throw LauncherError.journalCorrupt("Invalid session URL") }
         }
+        if let injection { try injection.validateForJournal() }
         guard recipeVersion > 0, runtimeDigest.algorithm == .sha256, componentIDs.count <= 64,
             Set(componentIDs).count == componentIDs.count, processes.count <= 1024, hides.count <= 256,
             processes.allSatisfy({ $0.pid > 0 }), (processGroupIDs?.count ?? 0) <= 1024,
