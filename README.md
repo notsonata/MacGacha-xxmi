@@ -1,6 +1,6 @@
 # MacGacha — universal launcher for HoYoverse games on Apple Silicon
 
-> 🧪 **Experimental XXMI fork.** HSR mod support builds on MacGacha 0.1.3. Fork release binaries are published separately from upstream. See [fork releases](https://github.com/notsonata/MacGacha-xxmi/releases). The first fork release is `v0.1.3-xxmi.2`.
+> 🧪 **XXMI fork.** HSR mod support builds on MacGacha 0.1.3. Fork release binaries are published separately from upstream. See [fork releases](https://github.com/notsonata/MacGacha-xxmi/releases). The first fork release is `v0.1.3-xxmi.2`.
 
 A native macOS launcher for **Genshin Impact**, **Honkai: Star Rail** and **Zenless Zone Zero** on Apple Silicon. It aims to provide reliable resumable downloads, file verification, and managed Wine / DXMT / D3DMetal runtimes.
 
