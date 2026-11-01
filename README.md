@@ -46,13 +46,6 @@ MacGacha uses the standalone XXMI injector core and a launch runner. You do not 
 
 For source updates and package maintenance, see [the XXMI build guide](compat/xxmi/README.md).
 
-## Latest update
-
-- Added a **Mods** switch above Play and **Refresh** for manually added mod folders.
-- Preserved SRMI settings between launches and made settings recovery retryable.
-- Corrected cursor-coordinate handling and disabled invalid or empty conditional blocks safely.
-- Fixed Finder Reveal for manually added mods and preserved disabled states during library refresh.
-
 ## Downloads
 
 The [current regular release](https://github.com/notsonata/MacGacha-xxmi/releases/tag/v0.1.3-xxmi.3) has two uploaded downloads:
