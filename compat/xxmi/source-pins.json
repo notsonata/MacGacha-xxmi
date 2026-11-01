@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "package": {
     "id": "hsr-srmi",
-    "version": "2.4.3-macgacha.1",
+    "version": "2.4.3-macgacha.2",
     "gameID": "starrail",
     "supportedRuntimeBundleIDs": [
       "d3dmetal-wine11.20-gptk4.0b3"
@@ -44,10 +44,10 @@
       ]
     },
     "payload": {
-      "sha256": "52bac2fe330559cb2896b23214881f567ffe01eea79f38769d912ece39fdff77",
-      "size": 4957184,
+      "sha256": "79da3363543a1f12f014922ae4dceaed0173db4405028d6f9b8c0dad92396ad8",
+      "size": 4959232,
       "kind": "PE32+ x86-64 DLL",
-      "role": "SRMI 2.4.3 D3D11 proxy rebuilt from the pinned source and focused patches; user-confirmed working Honkai: Star Rail compatibility baseline."
+      "role": "SRMI 2.4.3 D3D11 proxy with core cursor-coordinate and fail-closed conditional corrections; reproducible stage-3 build, pending live mod acceptance."
     },
     "d3dcompiler": {
       "sha256": "86110ac1986ff0e4f35e1a797a3ede99233c4a5bd12edacc6dd45750e22b4171",
@@ -138,6 +138,16 @@
         "path": "compat/xxmi/patches/0008-srmi-text-printer-vkd3d-all-literals.patch",
         "sha256": "9742669f5ad116d9551fac4dbbb6332df7377cf3064113f85def8871aeba74b6",
         "appliesTo": "SRMI 2.4.3 payload Core/SRMI/Shaders/TextPrinter.hlsl"
+      },
+      {
+        "path": "compat/xxmi/patches/0009-srmi-cursor-coordinate-contract.patch",
+        "sha256": "a808d2154af9c32ff81163fb25d12ada58969891a76feabab7ce64f8ec5c9f27",
+        "appliesTo": "DLL stage 3 after patches 0001-0007"
+      },
+      {
+        "path": "compat/xxmi/patches/0010-srmi-invalid-conditional-fail-closed.patch",
+        "sha256": "386e125112e1b4da799d1dd66583ffb4174c87071dfe2ee90a20d8f87c7670d0",
+        "appliesTo": "DLL stage 3 after patches 0001-0007 and 0009"
       }
     ]
   },
@@ -146,8 +156,10 @@
     "cleanSourceTreeFileCount": 631,
     "baseCandidateSHA256": "c563d40c29bd039b4b22219488996218cf5e87dc176020a728914ccc9e89dff1",
     "basePatchedTreeSHA256": "26258343d4f1b1d9706840d08fa19e75c851e40ec4d87871fe8ec29287b342a7",
-    "finalCandidateSHA256": "52bac2fe330559cb2896b23214881f567ffe01eea79f38769d912ece39fdff77",
-    "plan": "compat/xxmi/build/payload-build-plan.json"
+    "finalCandidateSHA256": "79da3363543a1f12f014922ae4dceaed0173db4405028d6f9b8c0dad92396ad8",
+    "plan": "compat/xxmi/build/payload-build-plan.json",
+    "finalPatchedTreeSHA256": "8329434de849ffafd9f59a8003a6cea14f8aebbccea3e346538c23373b9b3b44",
+    "finalStage": 3
   },
   "sources": {
     "xxmi-libs-package": {
@@ -179,7 +191,9 @@
         "0005-srmi-resizebuffers-argument-diagnostic.patch",
         "0006-srmi-resource-release-callback.patch",
         "0007-srmi-ngx-context-boundary.patch",
-        "0008-srmi-text-printer-vkd3d-all-literals.patch"
+        "0008-srmi-text-printer-vkd3d-all-literals.patch",
+        "0009-srmi-cursor-coordinate-contract.patch",
+        "0010-srmi-invalid-conditional-fail-closed.patch"
       ],
       "sha256": {
         "0001-srmi-chain-path-overflow.patch": "36975d974a630baa6337eca7ca3c152bbb3175be64666608473c904576ced455",
@@ -189,7 +203,9 @@
         "0005-srmi-resizebuffers-argument-diagnostic.patch": "195fcd3123e02ae2bf37155046fb76d4b46c752c89089ab5413c2168aac577ec",
         "0006-srmi-resource-release-callback.patch": "5be55e910da0d29f73aa048ac914aa5d1b748fff3464a6a576a99eea9a17c787",
         "0007-srmi-ngx-context-boundary.patch": "091434eb2238327b019adfd60aa70bd9ce499194125a37dd406bfebe1a883c1e",
-        "0008-srmi-text-printer-vkd3d-all-literals.patch": "9742669f5ad116d9551fac4dbbb6332df7377cf3064113f85def8871aeba74b6"
+        "0008-srmi-text-printer-vkd3d-all-literals.patch": "9742669f5ad116d9551fac4dbbb6332df7377cf3064113f85def8871aeba74b6",
+        "0009-srmi-cursor-coordinate-contract.patch": "a808d2154af9c32ff81163fb25d12ada58969891a76feabab7ce64f8ec5c9f27",
+        "0010-srmi-invalid-conditional-fail-closed.patch": "386e125112e1b4da799d1dd66583ffb4174c87071dfe2ee90a20d8f87c7670d0"
       }
     }
   }

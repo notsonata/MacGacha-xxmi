@@ -1,0 +1,185 @@
+# SRMI invalid conditional fail-closed correction
+# Base: XXMI-Libs-Package a7847eae82aaac32175c9a7d199673d5c9323bcd (XXMI Libraries v1.2.2)
+# Apply from the XXMI Libs package root after patches 0001-0007 with:
+#   patch -p1 --fuzz=0 < 0010-srmi-invalid-conditional-fail-closed.patch
+# Patch 0008 targets the SRMI payload shader and 0009 the cursor helpers; this
+# patch does not overlap either region.
+#
+# IfCommand::expression.parse() fails when a condition references a variable
+# that is not defined in the current namespace. ParseIfCommand and
+# ParseElseIfCommand used to delete the half-built command and return false.
+# IniHandler then reported one "Unrecognised entry" and kept parsing the body
+# as ordinary commands, so an imported mod's guarded assignments and draw
+# commands ran unconditionally, and the later "endif" could not match an "if"
+# (leaving an elif body in the previous branch or making a later else run even
+# though the elif condition was never evaluated).
+#
+# Keep the IfCommand/ElseIfCommand in the command list with expression_valid
+# false. Structure, scope depth and endif balance are handled exactly as for a
+# parsed condition, but the node runs neither branch. The optimiser never
+# static-evaluates a partially parsed expression: it clears both branches and
+# removes the node. Unresolved variables therefore fail closed with the
+# existing syntax diagnostic plus a clear block-disabled warning; they are
+# never reported as zero and never remapped to a manager-specific name.
+#
+# Bare or whitespace-only if/elif/else if conditions are retained as invalid
+# nodes too, and expression extraction cannot throw on an absent expression.
+#
+# Valid conditions are unchanged. This is a source-proven malformed-config
+# correction: a mod that depends on another manager's generated variables
+# still needs those definitions to become functional. It does not claim to
+# reproduce or repair a particular live visual symptom.
+#
+# IfCommand gains one bool, so rebuild every translation unit; do not mix
+# objects built from the old layout.
+#
+--- a/DirectX11/CommandList.h
++++ b/DirectX11/CommandList.h
+@@ -1657,6 +1657,11 @@
+ class IfCommand : public CommandListCommand {
+ public:
+ 	CommandListExpression expression;
++	// False when the "if"/"elif" condition could not be parsed. The command
++	// stays in the list so nesting and endif balance are preserved, but it
++	// runs neither branch and the optimiser discards it instead of
++	// evaluating a partial expression or falling back to zero.
++	bool expression_valid;
+ 	bool pre_finalised, post_finalised;
+ 	bool has_nested_else_if;
+ 	wstring section;
+--- a/DirectX11/CommandList.cpp
++++ b/DirectX11/CommandList.cpp
+@@ -9315,18 +9315,23 @@
+ 		const wstring *ini_namespace)
+ {
+ 	IfCommand *operation = new IfCommand(section);
+-	wstring expression = line->substr(line->find_first_not_of(L" \t", 3));
+-
+-	if (!operation->expression.parse(&expression, ini_namespace, pre_command_list->scope))
+-		goto bail;
++	size_t start = line->find_first_not_of(L" \t", 2);
++	wstring expression = start == wstring::npos ? L"" : line->substr(start);
++
++	if (expression.empty() || !operation->expression.parse(&expression, ini_namespace, pre_command_list->scope)) {
++		// Keep the node so the matching endif still balances and both
++		// branches stay isolated. The command runs neither branch and the
++		// optimiser discards it; an unparsed condition must never fall
++		// back to zero and execute the else branch.
++		operation->expression_valid = false;
++		LogOverlayW(LOG_WARNING, L"Invalid conditional expression; block disabled\n - [%ls] @ [%ls]\n",
++				section, line->c_str());
++	}
+ 
+ 	// New scope level to isolate local variables:
+ 	pre_command_list->scope->emplace_front();
+ 
+ 	return AddCommandToList(operation, NULL, NULL, pre_command_list, post_command_list, section, line->c_str(), NULL);
+-bail:
+-	delete operation;
+-	return false;
+ }
+ 
+ static bool ParseElseIfCommand(const wchar_t *section, const wstring *line, int prefix,
+@@ -9334,10 +9339,17 @@
+ 		const wstring *ini_namespace)
+ {
+ 	ElseIfCommand *operation = new ElseIfCommand(section);
+-	wstring expression = line->substr(line->find_first_not_of(L" \t", prefix));
+-
+-	if (!operation->expression.parse(&expression, ini_namespace, pre_command_list->scope))
+-		goto bail;
++	size_t start = line->find_first_not_of(L" \t", prefix - 1);
++	wstring expression = start == wstring::npos ? L"" : line->substr(start);
++
++	if (expression.empty() || !operation->expression.parse(&expression, ini_namespace, pre_command_list->scope)) {
++		// Keep the same else-placeholder + nested-if structure so a later
++		// "else" cannot become unconditional and this body cannot leak
++		// into the previous branch. The nested if is disabled.
++		operation->expression_valid = false;
++		LogOverlayW(LOG_WARNING, L"Invalid conditional expression; block disabled\n - [%ls] @ [%ls]\n",
++				section, line->c_str());
++	}
+ 
+ 	// Clear deepest scope level to isolate local variables:
+ 	pre_command_list->scope->front().clear();
+@@ -9347,9 +9359,6 @@
+ 	// an ElseIfCommand here, and will fix up the "endif" balance later.
+ 	AddCommandToList(new ElsePlaceholder(), NULL, NULL, pre_command_list, post_command_list, section, line->c_str(), NULL);
+ 	return AddCommandToList(operation, NULL, NULL, pre_command_list, post_command_list, section, line->c_str(), NULL);
+-bail:
+-	delete operation;
+-	return false;
+ }
+ 
+ static bool ParseElseCommand(const wchar_t *section,
+@@ -9446,11 +9455,13 @@
+ 		CommandList *pre_command_list, CommandList *post_command_list,
+ 		const wstring *ini_namespace)
+ {
+-	if (!wcsncmp(line->c_str(), L"if ", 3))
++	// Bare keywords survive INI whitespace trimming and must still create
++	// a balanced invalid node, never leave the following body unguarded.
++	if (!wcscmp(line->c_str(), L"if") || !wcsncmp(line->c_str(), L"if ", 3) || !wcsncmp(line->c_str(), L"if\t", 3))
+ 		return ParseIfCommand(section, line, pre_command_list, post_command_list, ini_namespace);
+-	if (!wcsncmp(line->c_str(), L"elif ", 5))
++	if (!wcscmp(line->c_str(), L"elif") || !wcsncmp(line->c_str(), L"elif ", 5) || !wcsncmp(line->c_str(), L"elif\t", 5))
+ 		return ParseElseIfCommand(section, line, 5, pre_command_list, post_command_list, ini_namespace);
+-	if (!wcsncmp(line->c_str(), L"else if ", 8))
++	if (!wcscmp(line->c_str(), L"else if") || !wcsncmp(line->c_str(), L"else if ", 8) || !wcsncmp(line->c_str(), L"else if\t", 8))
+ 		return ParseElseIfCommand(section, line, 8, pre_command_list, post_command_list, ini_namespace);
+ 	if (!wcscmp(line->c_str(), L"else"))
+ 		return ParseElseCommand(section, pre_command_list, post_command_list, ini_namespace);
+@@ -9461,6 +9472,7 @@
+ }
+ 
+ IfCommand::IfCommand(const wchar_t *section) :
++	expression_valid(true),
+ 	pre_finalised(false),
+ 	post_finalised(false),
+ 	has_nested_else_if(false),
+@@ -9498,6 +9510,11 @@
+ 
+ void IfCommand::run(CommandListState *state)
+ {
++	if (!expression_valid) {
++		COMMAND_LIST_LOG(state, "%S: invalid expression, block disabled\n", ini_line.c_str());
++		return;
++	}
++
+ 	if (expression.evaluate(state)) {
+ 		COMMAND_LIST_LOG(state, "%S: true {\n", ini_line.c_str());
+ 		state->extra_indent++;
+@@ -9526,6 +9543,16 @@
+ 
+ bool IfCommand::optimise(HackerDevice *device)
+ {
++	if (!expression_valid) {
++		// Never evaluate a partially parsed condition, and drop every
++		// command in both branches before they can be optimised or run.
++		true_commands_pre->clear();
++		true_commands_post->clear();
++		false_commands_pre->clear();
++		false_commands_post->clear();
++		return false;
++	}
++
+ 	return expression.optimise(device);
+ }
+ 
+@@ -9533,6 +9560,16 @@
+ {
+ 	if ((post && !post_finalised) || (!post && !pre_finalised)) {
+ 		LogOverlayW(LOG_WARNING, L"Statement \"if\" missing \"endif\":\n - \"%ls\"\n", ini_line.c_str());
++		return true;
++	}
++
++	if (!expression_valid) {
++		// Never static-evaluate an unparsed expression. Discard both
++		// branches so no command from the untrusted block can run later.
++		true_commands_pre->clear();
++		true_commands_post->clear();
++		false_commands_pre->clear();
++		false_commands_post->clear();
+ 		return true;
+ 	}
+ 

@@ -7,7 +7,7 @@ import ModSupport
 
 /// What the panel is currently doing. A nil activity means controls are idle.
 enum ModSupportActivity: Equatable {
-    case installing, repairing, updating, importing, removing, saving, moving
+    case installing, repairing, updating, importing, removing, saving, moving, refreshing
 }
 
 enum ModSupportViewState: Equatable {
@@ -100,6 +100,34 @@ enum ModSupportViewState: Equatable {
         }
     }
 
+    /// Picks up folders the user copied into the library in Finder without
+    /// moving or deleting them and reports folders that are not safe mods.
+    func rescanModSupportLibrary() {
+        guard modSupportTask == nil, canBeginGameOrRuntimeOperation() else { return }
+        modSupportActivity = .refreshing
+        modSupportError = nil
+        let store = modSupportStore
+        modSupportTask = Task { [weak self] in
+            do {
+                let result = try await store.refreshModLibrary()
+                let snapshot = try await store.snapshot()
+                guard let self else { return }
+                self.modSupportSnapshot = snapshot
+                self.modSupportViewState = .ready
+                if !result.rejected.isEmpty {
+                    self.modSupportError = String(localized: "Some folders in the mods folder were skipped because they aren't safe mods.")
+                }
+            } catch {
+                guard let self else { return }
+                let message = launcherError(error).userMessage
+                self.modSupportError = message
+                if self.modSupportSnapshot == nil { self.modSupportViewState = .failed(message) }
+            }
+            self?.modSupportActivity = nil
+            self?.modSupportTask = nil
+        }
+    }
+
     func filteredModSupportMods(matching query: String) -> [ManagedMod] {
         let mods = modSupportSnapshot?.mods ?? []
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -119,7 +147,9 @@ enum ModSupportViewState: Equatable {
     private func revealModSupportLibrary(modID: String? = nil) async {
         do {
             let directory = try await modSupportStore.modsDirectoryURL()
-            let url = modID.map { directory.appendingPathComponent($0, isDirectory: true) } ?? directory
+            let folder = modID.flatMap { id in modSupportSnapshot?.mods.first { $0.id == id }?.folderPath }
+            guard modID == nil || folder != nil else { return }
+            let url = folder.map { directory.appendingPathComponent($0, isDirectory: true) } ?? directory
             NSWorkspace.shared.activateFileViewerSelecting([url])
         } catch {
             modSupportError = launcherError(error).userMessage

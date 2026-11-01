@@ -211,6 +211,8 @@ struct XXMIPanel: View {
                 Button("Show Mods Folder") { model.revealModSupportFolder() }
                     .buttonStyle(.link)
                     .accessibilityLabel("Show Mods Folder in Finder")
+                Button("Refresh") { model.rescanModSupportLibrary() }
+                    .disabled(model.isModSupportBusy)
                 Button("Import…") { chooseMod() }
                     .disabled(model.isModSupportBusy)
             }
@@ -282,6 +284,7 @@ struct XXMIPanel: View {
         case .removing: String(localized: "Removing mod…")
         case .saving: String(localized: "Saving changes…")
         case .moving: String(localized: "Moving mods folder…")
+        case .refreshing: String(localized: "Refreshing Mods…")
         }
     }
 

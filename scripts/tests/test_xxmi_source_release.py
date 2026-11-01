@@ -172,6 +172,49 @@ class Fixture:
         return next(output.glob("*.tar.gz"))
 
 
+class Stage3Fixture(Fixture):
+    """Fixture whose plan also carries an optional final stage-3 tree."""
+
+    def __init__(self, root: Path):
+        super().__init__(root)
+        patches = root / "patches"
+        self.patch3a = write(
+            patches / "0004-stage3-cursor.patch",
+            "--- a/b.txt\n+++ b/b.txt\n@@ -1 +1 @@\n-stage2\n+stage3a\n",
+        )
+        self.patch3b = write(
+            patches / "0005-stage3-conditional.patch",
+            "--- a/b.txt\n+++ b/b.txt\n@@ -1 +1 @@\n-stage3a\n+stage3b\n",
+        )
+        expected_stage3 = root / "expected-stage3"
+        shutil.copytree(root / "expected-stage2", expected_stage3)
+        write(expected_stage3 / "b.txt", "stage3b\n")
+        stage3_manifest = xxmi_source_release.REBUILD.tree_manifest(expected_stage3)
+        self.plan["stage3"] = {
+            "patches": [
+                {
+                    "path": str(self.patch3a),
+                    "sha256": sha(self.patch3a.read_bytes()),
+                },
+                {
+                    "path": str(self.patch3b),
+                    "sha256": sha(self.patch3b.read_bytes()),
+                },
+            ],
+            "patchedTreeSHA256": stage3_manifest["sha256"],
+            "candidateSHA256": "3" * 64,
+            "compile": [
+                {
+                    "source": "b.txt",
+                    "sourceSHA256": sha(b"stage3b\n"),
+                }
+            ],
+            "link": {"rspLines": []},
+        }
+        self.stage3_tree = stage3_manifest
+        self.plan_path.write_text(json.dumps(self.plan, indent=2) + "\n", encoding="utf-8")
+
+
 class SourceReleaseTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="xxmi-source-release-tests-")
@@ -362,6 +405,82 @@ class SourceReleaseTests(unittest.TestCase):
         self.assertEqual(self.fixture.run(self.root / "out"), 0)
         after = xxmi_source_release.REBUILD.tree_manifest(self.fixture.source)
         self.assertEqual(before, after)
+
+
+class SourceReleaseStage3Tests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="xxmi-source-release-stage3-tests-")
+        self.root = Path(self.temp.name)
+        self.fixture = Stage3Fixture(self.root)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def extract(self, output: Path) -> Path:
+        archive = self.fixture.archive(output)
+        destination = self.root / "extract"
+        destination.mkdir()
+        with tarfile.open(archive) as opened:
+            opened.extractall(destination)
+        return destination / "xxmi-libs-v1.2.2-test-source-9.9.9-test"
+
+    def test_archives_final_stage3_tree_not_stage2(self):
+        output = self.root / "out"
+        self.assertEqual(self.fixture.run(output), 0)
+        top = self.extract(output)
+        patched = top / "patched" / SOURCE_NAME
+        self.assertEqual((patched / "b.txt").read_bytes(), b"stage3b\n")
+        self.assertEqual(
+            xxmi_source_release.REBUILD.tree_manifest(patched)["sha256"],
+            self.fixture.stage3_tree["sha256"],
+        )
+        self.assertNotEqual(
+            xxmi_source_release.REBUILD.tree_manifest(patched)["sha256"],
+            self.fixture.plan["stage2"]["patchedTreeSHA256"],
+        )
+
+        metadata = json.loads((top / "SOURCE-RELEASE.json").read_text(encoding="utf-8"))
+        self.assertEqual(metadata["trees"]["patched"]["sha256"], self.fixture.stage3_tree["sha256"])
+        self.assertEqual(
+            metadata["trees"]["stage2"]["sha256"],
+            self.fixture.plan["stage2"]["patchedTreeSHA256"],
+        )
+        self.assertEqual(
+            [entry["path"] for entry in metadata["stage3Patches"]],
+            [
+                "compat/xxmi/patches/0004-stage3-cursor.patch",
+                "compat/xxmi/patches/0005-stage3-conditional.patch",
+            ],
+        )
+        readme = (top / "README.md").read_text(encoding="utf-8")
+        self.assertIn("0004-stage3-cursor.patch", readme)
+        self.assertIn("0005-stage3-conditional.patch", readme)
+        self.assertIn(self.fixture.stage3_tree["sha256"], readme)
+        self.assertIn("stage-3 candidates", readme)
+
+    def test_rejects_stale_stage3_patch_hash(self):
+        self.fixture.plan["stage3"]["patches"][0]["sha256"] = "0" * 64
+        self.fixture.plan_path.write_text(
+            json.dumps(self.fixture.plan, indent=2) + "\n", encoding="utf-8"
+        )
+        output = self.root / "out"
+        self.assertEqual(self.fixture.run(output), 1)
+        self.assertFalse(output.exists() and any(output.iterdir()))
+
+    def test_rejects_missing_stage3_patch(self):
+        self.fixture.patch3b.unlink()
+        output = self.root / "out"
+        self.assertEqual(self.fixture.run(output), 1)
+        self.assertFalse(output.exists() and any(output.iterdir()))
+
+    def test_rejects_stage3_tree_mismatch(self):
+        self.fixture.plan["stage3"]["patchedTreeSHA256"] = "0" * 64
+        self.fixture.plan_path.write_text(
+            json.dumps(self.fixture.plan, indent=2) + "\n", encoding="utf-8"
+        )
+        output = self.root / "out"
+        self.assertEqual(self.fixture.run(output), 1)
+        self.assertFalse(output.exists() and any(output.iterdir()))
 
 
 if __name__ == "__main__":

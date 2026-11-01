@@ -268,7 +268,7 @@ class PackageTests(unittest.TestCase):
             self.skipTest("generated App/Resources/XXMI package is not present")
         pins = Path(__file__).resolve().parents[2] / "compat" / "xxmi" / "source-pins.json"
         manifest = xxmi_package.verify_package(package, pins_path=pins)
-        self.assertEqual(manifest["version"], "2.4.3-macgacha.1")
+        self.assertEqual(manifest["version"], xxmi_package._load_pins(pins)["package"]["version"])
         self.assertEqual(manifest["archiveSize"], (package / "hsr-srmi.zip").stat().st_size)
         with zipfile.ZipFile(package / "hsr-srmi.zip") as archive:
             for entry in manifest["files"]:
@@ -361,6 +361,8 @@ class PackageTests(unittest.TestCase):
         for entry in plan["basePatches"]:
             self.assertEqual(pinned[Path(entry["path"]).name], entry["sha256"])
         self.assertEqual(pinned[Path(plan["stage2"]["patch"]["path"]).name], plan["stage2"]["patch"]["sha256"])
+        for patch in plan.get("stage3", {}).get("patches", []):
+            self.assertEqual(pinned[Path(patch["path"]).name], patch["sha256"])
         self.assertEqual(
             pinned[Path(plan["textPrinter"]["patch"]["path"]).name],
             plan["textPrinter"]["patch"]["sha256"],

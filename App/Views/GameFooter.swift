@@ -34,6 +34,7 @@ struct GameFooter: View {
     @Binding var animated: Bool
     @State private var confirmingParts = false
     @State private var confirmingUninstall = false
+    @State private var confirmingModsRisk = false
     @State private var progressHovered = false
 
     private var state: GameState { model.games[game.id] ?? GameState(status: .unknown) }
@@ -76,6 +77,16 @@ struct GameFooter: View {
                         .foregroundStyle(.white.opacity(0.85))
                         .frame(maxWidth: 480, alignment: .trailing)
                 }
+                if AppModel.supportsModSupport(gameID: game.id) {
+                    modsToggle
+                    if let error = model.modSupportError {
+                        Label(error, systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.white)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: 480, alignment: .trailing)
+                    }
+                }
                 HStack(spacing: 10) {
                     if art?.video != nil {
                         backgroundToggle
@@ -93,6 +104,18 @@ struct GameFooter: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
         .animation(.smooth(duration: 0.25), value: action)
+        .task(id: game.id) {
+            guard AppModel.supportsModSupport(gameID: game.id) else { return }
+            await model.refreshModSupport()
+        }
+        .confirmationDialog("Enable mod injection?", isPresented: $confirmingModsRisk) {
+            Button("Enable Mods", role: .destructive) {
+                model.setModSupportInjection(true, acknowledgingRisk: true)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Mods inject code into the game. HoYoverse may treat this as cheating and permanently ban the account. Enable only if you accept that risk.")
+        }
         .confirmationDialog("Continue in parts?", isPresented: $confirmingParts) {
             Button("Continue in Parts") {
                 // Another game may have started meanwhile; approving now would only fail as busy.
@@ -109,6 +132,53 @@ struct GameFooter: View {
         } message: {
             Text(uninstallMessage)
         }
+    }
+
+    /// The same opt-in used by the XXMI panel, reachable without leaving the game.
+    private var modsToggle: some View {
+        HStack(spacing: 8) {
+            Toggle("Mods", isOn: modsBinding)
+                .toggleStyle(.switch)
+                .tint(game.tint)
+            if model.isModSupportBusy {
+                ProgressView().controlSize(.small)
+            }
+        }
+        .font(.callout)
+        .foregroundStyle(.white)
+        .padding(.horizontal, 14)
+        .frame(height: 40)
+        .glassEffect(.regular, in: .capsule)
+        .disabled(modsToggleDisabled)
+        .help(modsToggleHelp)
+        .accessibilityLabel(Text("Mods"))
+    }
+
+    private var modsToggleHelp: Text {
+        if model.modSupportSnapshot?.isInstalled != true,
+            model.modSupportSnapshot?.injectionEnabled != true {
+            return Text("Install XXMI in the XXMI panel to enable mods.")
+        }
+        return Text("Mod injection applies to the next launch, not a running game")
+    }
+
+    private var modsBinding: Binding<Bool> {
+        Binding(
+            get: { model.modSupportSnapshot?.injectionEnabled ?? false },
+            set: { enabled in
+                guard !model.isModSupportBusy else { return }
+                if enabled, model.modSupportNeedsRiskAcknowledgment {
+                    confirmingModsRisk = true
+                } else {
+                    model.setModSupportInjection(enabled, acknowledgingRisk: false)
+                }
+            }
+        )
+    }
+
+    private var modsToggleDisabled: Bool {
+        model.isModSupportBusy
+            || (model.modSupportSnapshot?.isInstalled != true && model.modSupportSnapshot?.injectionEnabled != true)
     }
 
     /// Switches between the animated background and the static image.

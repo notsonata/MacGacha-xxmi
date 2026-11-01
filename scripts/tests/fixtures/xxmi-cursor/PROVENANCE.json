@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 1,
+  "purpose": "Minimal authenticated source excerpts for the SRMI cursor coordinate contract regression test.",
+  "source": {
+    "repository": "https://github.com/SpectrumQT/XXMI-Libs-Package",
+    "tag": "v1.2.2",
+    "commit": "a7847eae82aaac32175c9a7d199673d5c9323bcd",
+    "license": "GPL-3.0-only",
+    "archiveSHA256": "13034531d4855e05273d9fbaf18539ec390432950ebd5986a115e5d3e5d8e275",
+    "cleanTreeSHA256": "77862e4e0dfb8c3c938e44eff60b7aa4832dd88e2852eea8779c7a09772eaae7",
+    "cleanFileCount": 631
+  },
+  "excerpts": [
+    {
+      "path": "DirectX11/CommandList.h",
+      "bannerLineCount": 6,
+      "segmentSeparator": "// --- verbatim source excerpt gap ---\n",
+      "segmentSeparatorLineCount": 1,
+      "segments": [
+        {
+          "sourceStart": 48,
+          "sourceEnd": 96,
+          "lineCount": 49,
+          "sha256": "ac46c956ac9f7a1f92c5dbfb5d1898458f3ed06e425706d74aea81df4502a498"
+        },
+        {
+          "sourceStart": 1447,
+          "sourceEnd": 1500,
+          "lineCount": 54,
+          "sha256": "a663281fd319051125210aea831a5d384cd471b8fe7a0fb2358f9a8c60476514"
+        }
+      ],
+      "fixtureLineCount": 110,
+      "fixtureSHA256": "1568419676eac235e31830ae62ebbd90a8cb04dbfb88fd642273a14bf0de7b99"
+    },
+    {
+      "path": "DirectX11/CommandList.cpp",
+      "bannerLineCount": 6,
+      "segmentSeparator": "// --- verbatim source excerpt gap ---\n",
+      "segmentSeparatorLineCount": 1,
+      "segments": [
+        {
+          "sourceStart": 3376,
+          "sourceEnd": 3458,
+          "lineCount": 83,
+          "sha256": "0b0920def85ad3ef09339de909aafdffa91269aea547e356dc4738cf4e08432b"
+        },
+        {
+          "sourceStart": 3705,
+          "sourceEnd": 3930,
+          "lineCount": 226,
+          "sha256": "93b0b44319357a7b61d140be6352a249f4846122f2b203b461bfe2cfc677ddd0"
+        }
+      ],
+      "fixtureLineCount": 316,
+      "fixtureSHA256": "2cb275c90d1b1eea97a9947a04ebea85a6c70926d3909aac88a5b64039db7cd0"
+    }
+  ]
+}

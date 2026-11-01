@@ -9,6 +9,13 @@ import RuntimeManager
 /// keeps the launch byte-for-byte identical to a normal launch.
 public protocol LaunchInjectionPreparing: Sendable {
     func prepare(gameID: String, runtimeBundleID: String, backendD3D11: URL) async throws -> LaunchInjectionConfiguration?
+    /// Runs once supervision has verified the session ended. Providers may
+    /// harvest runtime-written state; failures retain recovery ownership for retry.
+    func finish(configuration: LaunchInjectionConfiguration) async throws
+}
+
+public extension LaunchInjectionPreparing {
+    func finish(configuration: LaunchInjectionConfiguration) async throws {}
 }
 
 /// Immutable per-launch snapshot produced by the mod-support store. The files

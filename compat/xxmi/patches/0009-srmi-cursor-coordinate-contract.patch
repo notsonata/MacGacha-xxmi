@@ -1,0 +1,269 @@
+# SRMI cursor/window coordinate contract fix
+# Base: XXMI-Libs-Package a7847eae82aaac32175c9a7d199673d5c9323bcd (XXMI Libraries v1.2.2)
+# Apply from the XXMI Libs package root after patches 0001-0007 with:
+#   patch -p1 --fuzz=0 < 0009-srmi-cursor-coordinate-contract.patch
+# Patch 0008 targets the SRMI payload shader, not this DLL source tree.
+#
+# CURSOR_X/CURSOR_Y used the WINDOW_WIDTH/HEIGHT heuristic, which can return
+# RES_WIDTH/RT_WIDTH/gFallback instead of the client width/height. A cursor at
+# the client left/top edge also fell through to CURSOR_SCREEN_X/Y, i.e. desktop
+# pixels divided by that unrelated size. Failed GetCursorInfo, GetClientRect
+# and ScreenToClient calls were ignored, so zeroed or untranslated values could
+# be reported as real client coordinates.
+#
+# This patch records query attempts and validity explicitly and normalizes only
+# when the cursor screen position and its client conversion succeeded and the
+# client rect has a positive width/height. The actual client size is used as-is
+# (also below 640x480); minimized/zero-sized windows and failed APIs yield 0
+# instead of leaking desktop or render-target pixels. A valid zero or a
+# negative out-of-window client coordinate is returned unchanged.
+# CURSOR_SCREEN_X/Y stay raw screen pixels; CURSOR_WINDOW_X/Y stay raw client
+# pixels. For a healthy window (positive client rect, cursor inside) the values
+# are unchanged, because the old heuristic already preferred the client rect
+# first. WINDOW_WIDTH/HEIGHT and the rest of the heuristic chain are untouched.
+#
+# Queries remain cached per command list, including failed and zero-sized
+# results, but validity is explicit: a cached failure or zero-sized rect is
+# never used as client coordinates. Each new command list retries once.
+#
+# CommandListState gains five query/validity bools, so this is an ABI change
+# for that struct: rebuild every translation unit and do not mix objects built
+# from the old layout.
+#
+# This fixes a source-proven coordinate-contract bug. It does not by itself
+# prove any specific mod symptom (for example page switching in a slider UI or
+# interactions between two creators), which needs separate live evidence.
+#
+--- a/DirectX11/CommandList.h
++++ b/DirectX11/CommandList.h
+@@ -83,6 +83,16 @@
+ 	ID3D11ShaderResourceView *cursor_mask_view;
+ 	ID3D11ShaderResourceView *cursor_color_view;
+ 	RECT window_rect;
++	// These record whether the cursor/window queries above were attempted and
++	// whether they actually succeeded, instead of inferring it from the returned
++	// values. A zero client edge, a minimized window or a failed
++	// GetCursorInfo/ScreenToClient call must not be reported as a real client
++	// position, and must never be replaced with render target or desktop pixels.
++	bool cursor_info_queried;
++	bool cursor_info_valid;
++	bool cursor_window_coords_valid;
++	bool window_rect_queried;
++	bool window_rect_valid;
+ 
+ 	int recursion;
+ 	int extra_indent;
+--- a/DirectX11/CommandList.cpp
++++ b/DirectX11/CommandList.cpp
+@@ -3393,7 +3393,12 @@
+ 	recursion(0),
+ 	extra_indent(0),
+ 	aborted(false),
+-	scissor_valid(false)
++	scissor_valid(false),
++	cursor_info_queried(false),
++	cursor_info_valid(false),
++	cursor_window_coords_valid(false),
++	window_rect_queried(false),
++	window_rect_valid(false)
+ {
+ 	memset(&cursor_info, 0, sizeof(CURSORINFO));
+ 	memset(&cursor_info_ex, 0, sizeof(ICONINFO));
+@@ -3421,30 +3426,85 @@
+ 
+ #pragma region WindowCursorHelpers
+ 
+-static void UpdateWindowInfo(CommandListState *state)
+-{
+-	if (state->window_rect.right)
+-		return;
++static bool UpdateWindowInfo(CommandListState *state)
++{
++	if (state->window_rect_queried)
++		return state->window_rect_valid;
+ 
+-	if (G->hWnd)
+-		CursorUpscalingBypass_GetClientRect(G->hWnd, &state->window_rect);
+-	else
++	state->window_rect_queried = true;
++	state->window_rect_valid = false;
++
++	if (!G->hWnd) {
+ 		LogDebug("UpdateWindowInfo: No hWnd\n");
++		return false;
++	}
++
++	RECT rect = {};
++	// Query through the bypass so the rect stays in the same un-upscaled
++	// client space as CursorUpscalingBypass_ScreenToClient below. A failed
++	// query stays failed and unusable for this command list; the next state
++	// retries it instead of treating the zero rect as a real client size.
++	if (!CursorUpscalingBypass_GetClientRect(G->hWnd, &rect)) {
++		LogDebug("UpdateWindowInfo: GetClientRect failed\n");
++		return false;
++	}
++
++	state->window_rect = rect;
++	state->window_rect_valid = true;
++	return true;
+ }
+ 
+-static void UpdateCursorInfo(CommandListState *state)
+-{
+-	if (state->cursor_info.cbSize)
+-		return;
++// Returns the actual client size in pixels. A positive rect is used as-is,
++// including sizes below the 640x480 WINDOW_WIDTH/HEIGHT heuristic, because
++// normalized cursor coordinates must stay in the client pixel domain.
++// Zero-sized (minimized/hidden) rects and failed queries are unusable.
++static bool GetClientExtent(CommandListState *state, float *width, float *height)
++{
++	if (!UpdateWindowInfo(state))
++		return false;
+ 
++	float w = (float)(state->window_rect.right - state->window_rect.left);
++	float h = (float)(state->window_rect.bottom - state->window_rect.top);
++	if (w <= 0.0f || h <= 0.0f)
++		return false;
++
++	*width = w;
++	*height = h;
++	return true;
++}
++
++static bool UpdateCursorInfo(CommandListState *state)
++{
++	if (state->cursor_info_queried)
++		return state->cursor_info_valid;
++
++	state->cursor_info_queried = true;
++	state->cursor_info_valid = false;
++	state->cursor_window_coords_valid = false;
++
++	memset(&state->cursor_info, 0, sizeof(state->cursor_info));
+ 	state->cursor_info.cbSize = sizeof(CURSORINFO);
+-	CursorUpscalingBypass_GetCursorInfo(&state->cursor_info);
++	if (!CursorUpscalingBypass_GetCursorInfo(&state->cursor_info)) {
++		LogDebug("UpdateCursorInfo: GetCursorInfo failed\n");
++		// Keep the zeroed struct unusable for this command list rather than
++		// reporting the failed query as the origin. The next state retries.
++		return false;
++	}
++	state->cursor_info_valid = true;
++
+ 	memcpy(&state->cursor_window_coords, &state->cursor_info.ptScreenPos, sizeof(POINT));
+ 
+-	if (G->hWnd)
+-		CursorUpscalingBypass_ScreenToClient(G->hWnd, &state->cursor_window_coords);
+-	else
++	if (!G->hWnd) {
+ 		LogDebug("UpdateCursorInfo: No hWnd\n");
++		return true;
++	}
++
++	if (!CursorUpscalingBypass_ScreenToClient(G->hWnd, &state->cursor_window_coords)) {
++		LogDebug("UpdateCursorInfo: ScreenToClient failed\n");
++		return true;
++	}
++	state->cursor_window_coords_valid = true;
++	return true;
+ }
+ 
+ static void UpdateCursorInfoEx(CommandListState *state)
+@@ -3452,7 +3512,8 @@
+ 	if (state->cursor_info_ex.hbmMask)
+ 		return;
+ 
+-	UpdateCursorInfo(state);
++	if (!UpdateCursorInfo(state))
++		return;
+ 
+ 	GetIconInfo(state->cursor_info.hCursor, &state->cursor_info_ex);
+ }
+@@ -3758,9 +3819,6 @@
+ 
+ float CommandListOperand::evaluate(CommandListState *state, HackerDevice *device)
+ {
+-	float ftemp;
+-	float fret;
+-
+ 	if (state)
+ 		device = state->mHackerDevice;
+ 	else if (!device) {
+@@ -3872,50 +3930,41 @@
+ 				return (float)state->call_info->type;
+ 			return 0;
+ 		case ParamOverrideType::CURSOR_VISIBLE:
+-			UpdateCursorInfo(state);
++			if (!UpdateCursorInfo(state))
++				return 0;
+ 			return !!(state->cursor_info.flags & CURSOR_SHOWING);
+ 		case ParamOverrideType::CURSOR_SCREEN_X:
+-			UpdateCursorInfo(state);
++			if (!UpdateCursorInfo(state))
++				return 0;
+ 			return (float)state->cursor_info.ptScreenPos.x;
+ 		case ParamOverrideType::CURSOR_SCREEN_Y:
+-			UpdateCursorInfo(state);
++			if (!UpdateCursorInfo(state))
++				return 0;
+ 			return (float)state->cursor_info.ptScreenPos.y;
+ 		case ParamOverrideType::CURSOR_WINDOW_X:
+-			UpdateCursorInfo(state);
++			if (!UpdateCursorInfo(state) || !state->cursor_window_coords_valid)
++				return 0;
+ 			return (float)state->cursor_window_coords.x;
+ 		case ParamOverrideType::CURSOR_WINDOW_Y:
+-			UpdateCursorInfo(state);
++			if (!UpdateCursorInfo(state) || !state->cursor_window_coords_valid)
++				return 0;
+ 			return (float)state->cursor_window_coords.y;
+-		case ParamOverrideType::CURSOR_X:
+-			UpdateCursorInfo(state);
+-			ftemp = HeuristicGetWindowWidth(state);
+-			// Try to get cursor X from cursor_window_coords
+-			fret = (float)state->cursor_window_coords.x / ftemp;
+-			if (abs(fret) > 0.000001) {
+-				return fret;
+-			}
+-			// Fallback to CURSOR_SCREEN_X
+-			fret = (float)state->cursor_info.ptScreenPos.x / ftemp;
+-			if (abs(fret) > 0.000001) {
+-				return fret;
+-			}
+-			// All methods failed, return zero
+-			return 0;
+-		case ParamOverrideType::CURSOR_Y:
+-			UpdateCursorInfo(state);
+-			ftemp = HeuristicGetWindowHeight(state);
+-			// Try to get cursor Y from cursor_window_coords
+-			fret = (float)state->cursor_window_coords.y / ftemp;
+-			if (abs(fret) > 0.000001) {
+-				return fret;
+-			}
+-			// Fallback to CURSOR_SCREEN_Y
+-			fret = (float)state->cursor_info.ptScreenPos.y / ftemp;
+-			if (abs(fret) > 0.000001) {
+-				return fret;
+-			}
+-			// All methods failed, return zero
+-			return 0;
++		case ParamOverrideType::CURSOR_X: {
++			float client_width, client_height;
++			if (!UpdateCursorInfo(state) || !state->cursor_window_coords_valid)
++				return 0;
++			if (!GetClientExtent(state, &client_width, &client_height))
++				return 0;
++			return (float)state->cursor_window_coords.x / client_width;
++		}
++		case ParamOverrideType::CURSOR_Y: {
++			float client_width, client_height;
++			if (!UpdateCursorInfo(state) || !state->cursor_window_coords_valid)
++				return 0;
++			if (!GetClientExtent(state, &client_width, &client_height))
++				return 0;
++			return (float)state->cursor_window_coords.y / client_height;
++		}
+ 		case ParamOverrideType::CURSOR_HOTSPOT_X:
+ 			UpdateCursorInfoEx(state);
+ 			return (float)state->cursor_info_ex.xHotspot;

@@ -51,6 +51,30 @@ public actor ModSupportStore {
         }
     }
 
+    /// Adopts folders placed directly in the library without moving or deleting
+    /// them. Unsafe folders are reported and left in place.
+    public func refreshModLibrary() async throws -> ModLibraryRefreshResult {
+        let layout = layout, fileOps = fileOps
+        return try await gate.run {
+            try await BlockingIO.run {
+                try Self.refreshLibrary(layout: layout, fileOps: fileOps)
+            }
+        }
+    }
+
+    /// Called only after a launch is verifiably over. Copies the SRMI user file
+    /// out of that launch's immutable snapshot so later launches can start with
+    /// the settings the player saved. A session that began from an older
+    /// revision never overwrites newer settings.
+    public func finishLaunch(sessionDirectory: URL) async throws -> ModUserSettingsOutcome {
+        let layout = layout, fileOps = fileOps
+        return try await gate.run {
+            try await BlockingIO.run {
+                try Self.finishLaunch(sessionDirectory: sessionDirectory, layout: layout, fileOps: fileOps)
+            }
+        }
+    }
+
     /// Durable installation, preference and mod-library state.
     public func snapshot() async throws -> ModSupportSnapshot {
         let layout = layout, fileOps = fileOps
@@ -168,7 +192,7 @@ public actor ModSupportStore {
                 try layout.ensureDirectories(fs, includeMods: state.modsDirectory == nil)
                 let library = try Self.libraryFileSystem(state: state, layout: layout,
                     fileOps: fileOps)
-                let modPath = try SafeRelativePath(id)
+                let modPath = try SafeRelativePath(state.mods[index].folderPath)
                 let quarantineName = ".macgacha-remove-\(UUID().uuidString)"
                 let quarantinePath = try SafeRelativePath(quarantineName)
                 let hasFiles = try library.itemType(at: modPath) != nil
@@ -247,6 +271,8 @@ public actor ModSupportStore {
                         modsPath: modsPath)
                     try Self.configureD3DX(fs: fs, sessionPath: sessionPath,
                         payloadDirectory: payloadDirectory, backend: backend)
+                    try Self.seedUserConfig(fs: fs, layout: layout, sessionName: sessionName,
+                        payloadDirectory: payloadDirectory)
                     let runnerPath = try Self.sessionFile(manifest.runnerPath, sessionPath: sessionPath)
                     let injectorPath = try Self.sessionFile(manifest.injectorPath, sessionPath: sessionPath)
                     let payloadPath = try Self.sessionFile(manifest.payloadPath, sessionPath: sessionPath)

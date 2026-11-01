@@ -8,6 +8,14 @@ prebuilt DLL. Missing source, patches, SDK headers, import libraries, Clang
 resource headers, reference third-party objects or lld fail before any output
 is written. The checked-in build plan is generated from the verified build and
 contains only tokenized paths; developer paths never enter the plan.
+
+Stages 1 and 2 reproduce the base and NGX-boundary candidates. An optional final
+stage 3 applies the cursor-coordinate and invalid-conditional patches on top of
+stage 2 and recompiles every first-party translation unit; its layout changes
+make stage-2 first-party objects ABI-incompatible, so no stage-2 object is
+reused. Object hashes are verified through their COFF-timestamp-normalised
+form when the plan records one, because Clang writes a wall-clock timestamp
+into every object header while the linked /Brepro candidate stays identical.
 """
 
 from __future__ import annotations
@@ -37,6 +45,20 @@ def sha256_file(path: Path) -> str:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def canonical_object_sha256(path: Path) -> str:
+    """Hash a COFF object with its non-reproducible TimeDateStamp bytes cleared.
+
+    Clang stamps a wall-clock time into bytes 4-7 of the COFF header, so the raw
+    object hash changes on every build even though the generated code and the
+    linked /Brepro candidate are identical. Files shorter than a COFF header are
+    hashed verbatim.
+    """
+    data = path.read_bytes()
+    if len(data) >= 8:
+        data = data[:4] + b"\0" * 4 + data[8:]
+    return hashlib.sha256(data).hexdigest()
 
 
 def tree_manifest(root: Path) -> dict[str, Any]:
@@ -74,6 +96,17 @@ def load_plan(path: Path) -> dict[str, Any]:
     for key in ("sourcePin", "basePatches", "stage1", "stage2", "textPrinter"):
         if key not in plan:
             raise BuildError(f"build plan is missing {key}")
+    stage3 = plan.get("stage3")
+    if stage3 is not None:
+        if not isinstance(stage3, dict):
+            raise BuildError("build plan stage3 must be an object")
+        for key in ("patches", "patchedTreeSHA256", "candidateSHA256", "compile", "link"):
+            if key not in stage3:
+                raise BuildError(f"build plan stage3 is missing {key}")
+        if not stage3["patches"]:
+            raise BuildError("build plan stage3 must list at least one patch")
+        if not stage3["compile"]:
+            raise BuildError("build plan stage3 must list at least one compile command")
     return plan
 
 
@@ -94,6 +127,29 @@ def check_dir(path: Path, label: str, errors: list[str]) -> None:
         errors.append(f"missing {label}: {path}")
 
 
+def check_compile_commands(commands: list[dict[str, Any]], label: str, errors: list[str]) -> None:
+    seen_objects: set[str] = set()
+    for command in commands:
+        for key in ("source", "object", "sourceSHA256", "argv"):
+            if key not in command:
+                errors.append(f"{label} compile command is missing {key}")
+        if "objectCanonicalSHA256" not in command and "objectSHA256" not in command:
+            errors.append(f"{label} compile command has no object hash: {command.get('object')}")
+        object_name = command.get("object")
+        if isinstance(object_name, str):
+            if object_name in seen_objects:
+                errors.append(f"{label} duplicate compile object: {object_name}")
+            seen_objects.add(object_name)
+
+
+def check_patches(patches: list[dict[str, Any]], label: str, errors: list[str]) -> None:
+    for patch in patches:
+        path = resolve_plan_path(patch["path"])
+        check_file(path, f"{label} patch", errors)
+        if path.is_file() and sha256_file(path) != patch["sha256"]:
+            errors.append(f"{label} patch SHA-256 mismatch: {path}")
+
+
 def validate(
     plan: dict[str, Any],
     *,
@@ -108,22 +164,25 @@ def validate(
     check_dir(generated_assets, "generated-assets root", errors)
     check_dir(third_party_objects, "third-party object root", errors)
     for label, path in toolchain.items():
-        if label in ("msvc_include", "msvc_lib", "windows_sdk_include", "windows_sdk_lib", "clang_resource"):
+        if label in (
+            "msvc_include",
+            "msvc_lib",
+            "windows_sdk_include",
+            "windows_sdk_lib",
+            "clang_resource",
+            "lld_library_path",
+        ):
             check_dir(path, label, errors)
         else:
             check_file(path, label, errors, executable=True)
-    for patch in plan["basePatches"]:
-        path = resolve_plan_path(patch["path"])
-        check_file(path, "base patch", errors)
-        if path.is_file() and sha256_file(path) != patch["sha256"]:
-            errors.append(f"base patch SHA-256 mismatch: {path}")
-    for stage_name, stage in (("stage1", plan["stage1"]), ("stage2", plan["stage2"])):
-        if stage_name == "stage2":
-            patch = stage["patch"]
-            path = resolve_plan_path(patch["path"])
-            check_file(path, "stage2 patch", errors)
-            if path.is_file() and sha256_file(path) != patch["sha256"]:
-                errors.append(f"stage2 patch SHA-256 mismatch: {path}")
+    check_patches(plan["basePatches"], "base", errors)
+    check_patches([plan["stage2"]["patch"]], "stage2", errors)
+    check_compile_commands(plan["stage1"]["compile"], "stage1", errors)
+    check_compile_commands(plan["stage2"]["compile"], "stage2", errors)
+    stage3 = plan.get("stage3")
+    if stage3 is not None:
+        check_patches(stage3["patches"], "stage3", errors)
+        check_compile_commands(stage3["compile"], "stage3", errors)
     shader_patch = plan["textPrinter"]["patch"]
     shader_patch_path = resolve_plan_path(shader_patch["path"])
     check_file(shader_patch_path, "TextPrinter patch", errors)
@@ -215,6 +274,7 @@ def token_values(
         "{OBJDIR}": str(objects),
         "{BUILD}": str(build),
         "{THIRD}": str(third_party),
+        "{CLANG}": str(toolchain.get("clang", toolchain["clangxx"])),
         "{CLANGXX}": str(toolchain["clangxx"]),
         "{CLANG_RESOURCE}": str(toolchain["clang_resource"]),
         "{MSVC_INCLUDE}": str(toolchain["msvc_include"]),
@@ -248,6 +308,27 @@ def verify_source_hashes(source: Path, commands: list[dict[str, Any]], label: st
             )
 
 
+def verify_object(command: dict[str, Any], output: Path) -> None:
+    expected_canonical = command.get("objectCanonicalSHA256")
+    if expected_canonical is not None:
+        actual = canonical_object_sha256(output)
+        if actual != expected_canonical:
+            raise BuildError(
+                f"object canonical SHA-256 mismatch: {command['object']}\n"
+                f"got {actual}, expected {expected_canonical}"
+            )
+        return
+    expected_raw = command.get("objectSHA256")
+    if expected_raw is None:
+        raise BuildError(f"compile command has no object hash: {command['object']}")
+    actual = sha256_file(output)
+    if actual != expected_raw:
+        raise BuildError(
+            f"object SHA-256 mismatch: {command['object']}\n"
+            f"got {actual}, expected {expected_raw}"
+        )
+
+
 def compile_stage(
     commands: list[dict[str, Any]],
     *,
@@ -255,12 +336,15 @@ def compile_stage(
     objects: Path,
     log_dir: Path,
     values: dict[str, str],
+    c_compiler: Path,
 ) -> None:
     objects.mkdir(parents=True, exist_ok=True)
     environment = os.environ.copy()
     environment.update({"LC_ALL": "C", "TZ": "UTC", "SOURCE_DATE_EPOCH": "0"})
     for command in commands:
         argv = expand(command["argv"], values)
+        if command["source"].endswith(".c"):
+            argv[0] = str(c_compiler)
         result = run(argv, cwd=source, env=environment)
         (log_dir / f"compile-{command['object']}.log").write_text(
             result.stdout + result.stderr, encoding="utf-8"
@@ -277,12 +361,7 @@ def compile_stage(
         output = objects / command["object"]
         if not output.is_file():
             raise BuildError(f"compiler did not produce {output}")
-        actual = sha256_file(output)
-        if actual != command["objectSHA256"]:
-            raise BuildError(
-                f"object SHA-256 mismatch: {command['object']}\n"
-                f"got {actual}, expected {command['objectSHA256']}"
-            )
+        verify_object(command, output)
 
 
 def link_stage(
@@ -348,6 +427,8 @@ def build(
     )
     stage1 = plan["stage1"]
     stage2 = plan["stage2"]
+    stage3 = plan.get("stage3")
+    c_compiler = Path(toolchain.get("clang", toolchain["clangxx"]))
     source1 = work / "stage1" / "src"
     objects1 = work / "stage1" / "objects"
     build1 = work / "stage1" / "build"
@@ -371,7 +452,14 @@ def build(
         third_party=third_party_objects,
         toolchain=toolchain,
     )
-    compile_stage(stage1["compile"], source=source1, objects=objects1, log_dir=log_dir, values=values1)
+    compile_stage(
+        stage1["compile"],
+        source=source1,
+        objects=objects1,
+        log_dir=log_dir,
+        values=values1,
+        c_compiler=c_compiler,
+    )
     linked1 = link_stage(
         stage1["link"]["rspLines"],
         objects=objects1,
@@ -398,7 +486,14 @@ def build(
         third_party=third_party_objects,
         toolchain=toolchain,
     )
-    compile_stage(stage2["compile"], source=source2, objects=objects2, log_dir=log_dir, values=values2)
+    compile_stage(
+        stage2["compile"],
+        source=source2,
+        objects=objects2,
+        log_dir=log_dir,
+        values=values2,
+        c_compiler=c_compiler,
+    )
     linked2 = link_stage(
         stage2["link"]["rspLines"],
         objects=objects2,
@@ -411,31 +506,84 @@ def build(
     )
     if sha256_file(linked2) != stage2["candidateSHA256"]:
         raise BuildError("stage 2 candidate SHA-256 does not match the verified payload")
+    final = linked2
+    maps = {
+        "stage1": str(build1 / "d3d11.map"),
+        "stage2": str(build2 / "d3d11.map"),
+    }
+    limitations = [
+        "Third-party objects are reused from the explicitly supplied authenticated tree; they are hash-checked but not rebuilt from source.",
+        "The DirectXTK generated SimpleMath.inl is copied from the explicitly supplied generated-assets tree.",
+        "This is a host Clang/lld cross-build, not an MSVC release build.",
+        "The TextPrinter shader patch is a separate payload change and is not applied by this DLL build.",
+        "No Wine, game, launcher, install, download, or installed-state action is performed.",
+    ]
+    if stage3 is not None:
+        source3 = work / "stage3" / "src"
+        objects3 = work / "stage3" / "objects"
+        build3 = work / "stage3" / "build"
+        shutil.copytree(source2, source3)
+        for patch in stage3["patches"]:
+            apply_patch(source3, resolve_plan_path(patch["path"]), log_dir)
+        if tree_manifest(source3)["sha256"] != stage3["patchedTreeSHA256"]:
+            raise BuildError("stage 3 patched tree SHA-256 does not match the build plan")
+        verify_source_hashes(source3, stage3["compile"], "stage3")
+        # Stage 3 must not reuse stage-2 first-party objects: its layout changes
+        # make them ABI-incompatible, so the object directory starts empty and
+        # every listed translation unit is compiled again from the stage-3 tree.
+        values3 = token_values(
+            source=source3,
+            objects=objects3,
+            build=build3,
+            third_party=third_party_objects,
+            toolchain=toolchain,
+        )
+        compile_stage(
+            stage3["compile"],
+            source=source3,
+            objects=objects3,
+            log_dir=log_dir,
+            values=values3,
+            c_compiler=c_compiler,
+        )
+        linked3 = link_stage(
+            stage3["link"]["rspLines"],
+            objects=objects3,
+            build=build3,
+            source=source3,
+            third_party=third_party_objects,
+            toolchain=toolchain,
+            log_dir=log_dir,
+            label="stage3",
+        )
+        if sha256_file(linked3) != stage3["candidateSHA256"]:
+            raise BuildError("stage 3 candidate SHA-256 does not match the verified payload")
+        final = linked3
+        maps["stage3"] = str(build3 / "d3d11.map")
+        limitations.append(
+            "Stage 3 recompiles every first-party translation unit from the fully "
+            "patched tree; stage-2 first-party objects are not reused because the "
+            "CommandListState and IfCommand layout changes make them ABI-incompatible."
+        )
     candidate = candidate_dir / "d3d11.dll"
-    shutil.copy2(linked2, candidate)
+    shutil.copy2(final, candidate)
     manifest = {
         "schemaVersion": 1,
         "status": "success",
         "sourcePin": plan["sourcePin"],
         "basePatches": plan["basePatches"],
         "stage2Patch": stage2["patch"],
+        "finalStage": 3 if stage3 is not None else 2,
         "candidate": {
             "path": str(candidate),
             "size": candidate.stat().st_size,
             "sha256": sha256_file(candidate),
         },
-        "maps": {
-            "stage1": str(build1 / "d3d11.map"),
-            "stage2": str(build2 / "d3d11.map"),
-        },
-        "limitations": [
-            "Third-party objects are reused from the explicitly supplied authenticated tree; they are hash-checked but not rebuilt from source.",
-            "The DirectXTK generated SimpleMath.inl is copied from the explicitly supplied generated-assets tree.",
-            "This is a host Clang/lld cross-build, not an MSVC release build.",
-            "The TextPrinter shader patch is a separate payload change and is not applied by this DLL build.",
-            "No Wine, game, launcher, install, download, or installed-state action is performed.",
-        ],
+        "maps": maps,
+        "limitations": limitations,
     }
+    if stage3 is not None:
+        manifest["stage3Patches"] = stage3["patches"]
     (output_dir / "BUILD-MANIFEST.json").write_text(
         json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
     )
@@ -449,17 +597,31 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--generated-assets", type=Path, required=True)
     parser.add_argument("--third-party-objects", type=Path, required=True)
     parser.add_argument("--clangxx", type=Path, required=True)
+    parser.add_argument(
+        "--clang",
+        type=Path,
+        help="C driver for .c translation units (default: the sibling clang of --clangxx)",
+    )
     parser.add_argument("--clang-resource", type=Path, required=True)
     parser.add_argument("--msvc-include", type=Path, required=True)
     parser.add_argument("--msvc-lib", type=Path, required=True)
     parser.add_argument("--windows-sdk-include", type=Path, required=True)
     parser.add_argument("--windows-sdk-lib", type=Path, required=True)
     parser.add_argument("--lld-link", type=Path, required=True)
-    parser.add_argument("--lld-library-path", type=Path)
+    parser.add_argument(
+        "--lld-library-path",
+        type=Path,
+        help="directory containing the lld-link sibling libraries (DYLD_LIBRARY_PATH)",
+    )
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--check", action="store_true", help="validate every input and stop")
     args = parser.parse_args(argv)
+    clang = args.clang
+    if clang is None:
+        sibling = args.clangxx.with_name("clang")
+        clang = sibling if sibling.is_file() else args.clangxx
     toolchain = {
+        "clang": clang,
         "clangxx": args.clangxx,
         "clang_resource": args.clang_resource,
         "msvc_include": args.msvc_include,

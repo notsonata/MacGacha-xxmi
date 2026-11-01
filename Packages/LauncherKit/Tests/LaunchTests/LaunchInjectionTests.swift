@@ -50,15 +50,18 @@ private final class RecordingInjectionProvider: LaunchInjectionPreparing, Sendab
     }
     private struct State {
         var calls: [Call] = []
+        var finished: [LaunchInjectionConfiguration] = []
         var configuration: LaunchInjectionConfiguration?
         var error: LauncherError?
         var onPrepare: (@Sendable () throws -> Void)?
+        var finishFails = false
     }
     private let state = Mutex(State())
     init(configuration: LaunchInjectionConfiguration? = nil) {
         state.withLock { $0.configuration = configuration }
     }
     var calls: [Call] { state.withLock { $0.calls } }
+    var finished: [LaunchInjectionConfiguration] { state.withLock { $0.finished } }
     func fail(_ error: LauncherError = .io("injected injection preparation failure")) { state.withLock { $0.error = error } }
     func onPrepare(_ action: @escaping @Sendable () throws -> Void) { state.withLock { $0.onPrepare = action } }
     func setConfiguration(_ configuration: LaunchInjectionConfiguration?) {
@@ -73,6 +76,15 @@ private final class RecordingInjectionProvider: LaunchInjectionPreparing, Sendab
         try action?()
         return configuration
     }
+    func failFinish() { state.withLock { $0.finishFails = true } }
+    func finish(configuration: LaunchInjectionConfiguration) async throws {
+        let fails = state.withLock { state in
+            state.finished.append(configuration)
+            return state.finishFails
+        }
+        if fails { throw LauncherError.io("injected settings save failure") }
+    }
+    func allowFinish() { state.withLock { $0.finishFails = false } }
 }
 
 private final class InjectionOrder: Sendable {
@@ -163,8 +175,34 @@ private func resolvedLaunch(_ f: ManagerFixture, selection: LaunchRuntimeSelecti
         #expect(order.all == ["prepare", "spawn"])
         let journal = try await f.journal()
         #expect(journal?.injection == configuration)
+        #expect(provider.finished.isEmpty)
 
         try await f.end(manager); await consumer.value
+        #expect(provider.finished == [configuration])
+    }
+
+    @Test func settingsHarvestFailureRemainsRetryable() async throws {
+        let f = try await ManagerFixture.make()
+        try addRootDriveMapping(f)
+        let selection = try makeAllowedRuntime(f)
+        let configuration = try makeInjectionSnapshot(f)
+        let provider = RecordingInjectionProvider(configuration: configuration)
+        provider.failFinish()
+        let manager = makeManager(f, selection: selection, provider: provider, spawner: InjectionSpawner())
+        let events = ManagerEvents(), consumer = await f.consume(manager, events: events)
+        await events.waitForRunning()
+        try await f.end(manager)
+        await manager.waitForSupervision(game: "starrail")
+        await consumer.value
+        let pending = try #require(try await f.journal())
+        #expect(pending.endLogged != true)
+        #expect(pending.state == .recoveryPending)
+        #expect(provider.finished == [configuration])
+        provider.allowFinish()
+        try await manager.recoverIfNeeded(game: "starrail")
+        #expect(provider.finished.count == 2)
+        #expect(try await f.journal() == nil)
+        try await f.assertOriginalRestored()
     }
 
     @Test func nilConfigurationPreservesOriginalLaunch() async throws {

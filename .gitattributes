@@ -1,3 +1,6 @@
 
 # Pinned upstream patches retain exact whitespace and CRLF bytes for zero-fuzz application.
 compat/xxmi/patches/*.patch -text -whitespace
+
+# Authenticated upstream excerpts must retain verbatim whitespace and line endings.
+scripts/tests/fixtures/** -text -whitespace

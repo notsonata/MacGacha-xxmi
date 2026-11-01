@@ -18,4 +18,8 @@ struct ModSupportLaunchAdapter: LaunchInjectionPreparing {
             injectorURL: snapshot.injectorURL, payloadURL: snapshot.payloadURL,
             sessionDirectory: snapshot.sessionDirectory)
     }
+
+    func finish(configuration: LaunchInjectionConfiguration) async throws {
+        _ = try await store.finishLaunch(sessionDirectory: configuration.sessionDirectory)
+    }
 }

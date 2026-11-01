@@ -534,6 +534,9 @@ public actor LaunchManager {
 
     private func verifiedEnd(_ context: Context) async throws {
         guard context.hasEnded, context.session.endLogged != true else { return }
+        if let injection = context.session.injection {
+            try await injectionPreparation?.finish(configuration: injection)
+        }
         var snapshot = context.session
         snapshot.endLogged = true
         snapshot.startupPending = false

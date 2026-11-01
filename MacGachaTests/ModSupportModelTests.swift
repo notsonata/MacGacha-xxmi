@@ -169,6 +169,36 @@ struct ModSupportModelTests {
         #expect(model.modSupportViewState == .ready)
     }
 
+    @Test(.enabled(if: bundledPackageAvailable)) func rescansManualFoldersAndReportsUnsafeOnes() async throws {
+        let package = try await BundledXXMIPackage.load()
+        let root = try temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = makeModel(root: root)
+        model.installModSupport(package: package)
+        await settle(model)
+        let library = try #require(model.modSupportModsDirectory)
+        let safe = library.appendingPathComponent("Firefly", isDirectory: true)
+        try FileManager.default.createDirectory(at: safe, withIntermediateDirectories: true)
+        try "[TextureOverride]\nhash = fixture\n".write(to: safe.appendingPathComponent("mod.ini"),
+            atomically: true, encoding: .utf8)
+        let unsupported = library.appendingPathComponent("Unsafe", isDirectory: true)
+        try FileManager.default.createDirectory(at: unsupported, withIntermediateDirectories: true)
+        try "[TextureOverride]\n".write(to: unsupported.appendingPathComponent("mod.ini"),
+            atomically: true, encoding: .utf8)
+        try Data([0x4D, 0x5A, 0x00, 0x00]).write(to: unsupported.appendingPathComponent("payload.exe"))
+
+        model.rescanModSupportLibrary()
+        await settle(model)
+
+        #expect(model.modSupportSnapshot?.mods.map(\.name) == ["Firefly"])
+        #expect(model.modSupportError != nil)
+        #expect(FileManager.default.fileExists(atPath: unsupported.appendingPathComponent("payload.exe").path))
+
+        model.rescanModSupportLibrary()
+        await settle(model)
+        #expect(model.modSupportSnapshot?.mods.count == 1)
+    }
+
     @Test func onlyStarRailIsSupported() {
         #expect(AppModel.supportsModSupport(gameID: "starrail"))
         #expect(!AppModel.supportsModSupport(gameID: "starrail-cn"))

@@ -2,17 +2,42 @@
 // MacGacha — https://github.com/deruta74/MacGacha — see LICENSE and NOTICE (additional term under GPL section 7(b)).
 import Foundation
 
+/// Counts from rescanning the library for folders placed there outside the app.
+public struct ModLibraryRefreshResult: Sendable, Equatable {
+    public let added: Int
+    public let removed: Int
+    public let updated: Int
+    /// Folder names that were left untouched because they are not safe mods.
+    public let rejected: [String]
+    public let changed: Bool
+
+    public init(added: Int, removed: Int, updated: Int, rejected: [String], changed: Bool) {
+        self.added = added; self.removed = removed; self.updated = updated
+        self.rejected = rejected; self.changed = changed
+    }
+}
+
+/// Result of copying SRMI's persistent user file out of a finished launch.
+public enum ModUserSettingsOutcome: Sendable, Equatable {
+    case stored
+    case unchanged
+    case superseded
+    case notPrepared
+}
+
 public struct ManagedMod: Identifiable, Sendable, Equatable {
     public let id: String
     public let name: String
     public let enabled: Bool
     public let fileCount: Int
+    public let folderPath: String
 
-    public init(id: String, name: String, enabled: Bool, fileCount: Int) {
+    public init(id: String, name: String, enabled: Bool, fileCount: Int, folderPath: String? = nil) {
         self.id = id
         self.name = name
         self.enabled = enabled
         self.fileCount = fileCount
+        self.folderPath = folderPath ?? id
     }
 }
 

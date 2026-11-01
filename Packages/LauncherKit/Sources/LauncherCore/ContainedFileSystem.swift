@@ -73,6 +73,25 @@ public struct ContainedFileSystem: Sendable, Hashable {
         return try names(in: fd, budget: &budget, maximumEntries: maximum).map { try SafeRelativePath($0) }
     }
 
+    /// Lists valid root entries and reports invalid names separately, so a
+    /// foreign filename cannot block a library rescan of its siblings.
+    package func contentsOfRootDirectoryReportingInvalid() throws -> (paths: [SafeRelativePath], invalid: [String]) {
+        guard let fd = try directory([], create: false) else { return ([], []) }
+        defer { close(fd) }
+        var budget = Self.entryLimit
+        var paths: [SafeRelativePath] = []
+        var invalid: [String] = []
+        for bytes in try rawNames(in: fd, budget: &budget).sorted(by: { $0.lexicographicallyPrecedes($1) }) {
+            guard let name = String(bytes: bytes, encoding: .utf8),
+                  let path = try? SafeRelativePath(name) else {
+                invalid.append(String(decoding: bytes, as: UTF8.self))
+                continue
+            }
+            paths.append(path)
+        }
+        return (paths, invalid)
+    }
+
     /// Removes directories only. Foreign files, symlinks and special entries are
     /// left untouched, and symlinks are never traversed.
     package func pruneEmptyDirectories() throws {

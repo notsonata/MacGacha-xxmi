@@ -22,7 +22,7 @@ private var generatedPackage: URL {
         let store = ModSupportStore(paths: AppPaths(root: root))
         try await store.install(manifest: manifest, archive: generatedPackage.appendingPathComponent("hsr-srmi.zip"))
         let snapshot = try await store.snapshot()
-        #expect(snapshot.installedVersion == "2.4.3-macgacha.1")
+        #expect(snapshot.installedVersion == manifest.version)
         #expect(!snapshot.injectionEnabled)
     }
 }

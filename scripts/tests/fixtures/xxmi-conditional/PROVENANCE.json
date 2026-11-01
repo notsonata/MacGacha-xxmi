@@ -1,0 +1,174 @@
+{
+  "schemaVersion": 1,
+  "purpose": "Minimal authenticated source excerpts for the SRMI invalid-conditional fail-closed regression test.",
+  "source": {
+    "repository": "https://github.com/SpectrumQT/XXMI-Libs-Package",
+    "tag": "v1.2.2",
+    "commit": "a7847eae82aaac32175c9a7d199673d5c9323bcd",
+    "license": "GPL-3.0-only",
+    "archiveSHA256": "13034531d4855e05273d9fbaf18539ec390432950ebd5986a115e5d3e5d8e275",
+    "cleanTreeSHA256": "77862e4e0dfb8c3c938e44eff60b7aa4832dd88e2852eea8779c7a09772eaae7",
+    "cleanFileCount": 631
+  },
+  "excerpts": [
+    {
+      "path": "DirectX11/CommandList.h",
+      "bannerLineCount": 6,
+      "segmentSeparator": "// --- verbatim source excerpt gap ---\n",
+      "segmentSeparatorLineCount": 1,
+      "segments": [
+        {
+          "sourceStart": 98,
+          "sourceEnd": 164,
+          "lineCount": 67,
+          "sha256": "3e257a1cea5f88a37d5eab53623a37ee4e1084185376764dbe97ebe75cf94640"
+        },
+        {
+          "sourceStart": 166,
+          "sourceEnd": 211,
+          "lineCount": 46,
+          "sha256": "5ea336884581b62169938e186658bc837201135185ade2044ebe153384f6cefb"
+        },
+        {
+          "sourceStart": 1323,
+          "sourceEnd": 1330,
+          "lineCount": 8,
+          "sha256": "ae39804e311521e1b3b8c6edc034022c3e5ce8043875ac2ab3917aa9566137b8"
+        },
+        {
+          "sourceStart": 1595,
+          "sourceEnd": 1603,
+          "lineCount": 9,
+          "sha256": "ec1d60eadbde7ad3d5cf905091939f8ca06e369562a4a49423ac93a513fe0c74"
+        },
+        {
+          "sourceStart": 1647,
+          "sourceEnd": 1688,
+          "lineCount": 42,
+          "sha256": "d6695f0d591c383a47be4889c05cdc9d60e120711ccaed72a43a4a61efa94742"
+        }
+      ],
+      "fixtureLineCount": 182,
+      "fixtureSHA256": "b15d1f320c3b15ae3e75c07e9b6595a99e6004b0fad00c9830ef6843f384270e"
+    },
+    {
+      "path": "DirectX11/CommandList.cpp",
+      "bannerLineCount": 6,
+      "segmentSeparator": "// --- verbatim source excerpt gap ---\n",
+      "segmentSeparatorLineCount": 1,
+      "segments": [
+        {
+          "sourceStart": 140,
+          "sourceEnd": 175,
+          "lineCount": 36,
+          "sha256": "0f1d72cb8c412e2d70571a55b72409735bdb45bc83ff848d2b26dd2669755449"
+        },
+        {
+          "sourceStart": 578,
+          "sourceEnd": 618,
+          "lineCount": 41,
+          "sha256": "501dfd1fb6fcd7e7867f516a65329c6177b7ebfc711d8b8df8dce3adc2531439"
+        },
+        {
+          "sourceStart": 625,
+          "sourceEnd": 645,
+          "lineCount": 21,
+          "sha256": "387aee4f6cfb57c77c2b0d30c93832a7876bd0c5511d1c9c0b095ad6ffe36a30"
+        },
+        {
+          "sourceStart": 3331,
+          "sourceEnd": 3335,
+          "lineCount": 5,
+          "sha256": "8c12739a9b5dd685994d9b268d5dd5eb761cbb46ddf8e784d90e8e99c8616349"
+        },
+        {
+          "sourceStart": 3361,
+          "sourceEnd": 3374,
+          "lineCount": 14,
+          "sha256": "fbaa02957a5f226986c474554fdca03b0c7c630faa63dfaee058cc96b276b2e7"
+        },
+        {
+          "sourceStart": 4032,
+          "sourceEnd": 4204,
+          "lineCount": 173,
+          "sha256": "a62837d85d84ab4de0b6ef83b51fe2bd34e16aaa9f21a173e9c56dcc6ee039f3"
+        },
+        {
+          "sourceStart": 5903,
+          "sourceEnd": 5930,
+          "lineCount": 28,
+          "sha256": "dcf687e87e25a20049322728ee914436ce733303e6b38b0646ae398115d4260f"
+        },
+        {
+          "sourceStart": 9264,
+          "sourceEnd": 9522,
+          "lineCount": 259,
+          "sha256": "4ac8adfebca00f59dda62e29f504b00b98f26d657fe491bec3ba29a6ad7feaaf"
+        }
+      ],
+      "fixtureLineCount": 590,
+      "fixtureSHA256": "854fc71c7e73c96476a5e677a42c19e0d1df43059509cca6792897a488a1bf76"
+    },
+    {
+      "path": "DirectX11/IniHandler.h",
+      "bannerLineCount": 6,
+      "segmentSeparator": "// --- verbatim source excerpt gap ---\n",
+      "segmentSeparatorLineCount": 1,
+      "segments": [
+        {
+          "sourceStart": 11,
+          "sourceEnd": 38,
+          "lineCount": 28,
+          "sha256": "ee8beffcf07e98e3ebe9f346ef09ab121d2faa36f1fc776cc1c8703fe90afb41"
+        }
+      ],
+      "fixtureLineCount": 34,
+      "fixtureSHA256": "f82f871b0ba68ccc10dc96fcadfa52dbe7300dd0acfcd2cb18f803a8d1076d91"
+    },
+    {
+      "path": "DirectX11/IniHandler.cpp",
+      "bannerLineCount": 6,
+      "segmentSeparator": "// --- verbatim source excerpt gap ---\n",
+      "segmentSeparatorLineCount": 1,
+      "segments": [
+        {
+          "sourceStart": 263,
+          "sourceEnd": 266,
+          "lineCount": 4,
+          "sha256": "905ed1321b9cc48e605f015a76d8169c6f311dc81ae224b5846f9bb24de9643e"
+        },
+        {
+          "sourceStart": 289,
+          "sourceEnd": 296,
+          "lineCount": 8,
+          "sha256": "ed0284eeea62e9e73be0824567c7e366b9d15b3eccd4e0e692031891886ba521"
+        },
+        {
+          "sourceStart": 2209,
+          "sourceEnd": 2357,
+          "lineCount": 149,
+          "sha256": "f761b892b689fd2b10d002c104cfc0804b9009efb7a9a356fc742d6363cb485b"
+        }
+      ],
+      "fixtureLineCount": 169,
+      "fixtureSHA256": "8040298cc795ac1a0aa2ce7e82e1b5388059caf7ed6efb52b146a9398a5fb1bc"
+    },
+    {
+      "path": "IniWhitespace.inc",
+      "sourcePath": "DirectX11/IniHandler.cpp",
+      "bannerLineCount": 6,
+      "segmentSeparator": "// --- verbatim source excerpt gap ---\n",
+      "segmentSeparatorLineCount": 1,
+      "segments": [
+        {
+          "sourceStart": 591,
+          "sourceEnd": 597,
+          "lineCount": 7,
+          "sha256": "6235b4b609060509ce94854d2889aee28035219f07feab6d6e24abfa5cddda92"
+        }
+      ],
+      "fixtureLineCount": 13,
+      "fixtureSHA256": "39e27bc187ae91d233fe08ba1d0df92f1e136a3f1c28dadcb4611aef2378984a"
+    }
+  ]
+}

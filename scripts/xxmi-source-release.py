@@ -220,6 +220,10 @@ def validate_inputs(
     path = _regular_file(REBUILD.resolve_plan_path(stage2_patch["path"]), "stage2 patch")
     if sha256_file(path) != stage2_patch["sha256"]:
         raise ReleaseError(f"stage2 patch SHA-256 mismatch: {path}")
+    for patch in plan.get("stage3", {}).get("patches", []):
+        path = _regular_file(REBUILD.resolve_plan_path(patch["path"]), "stage3 patch")
+        if sha256_file(path) != patch["sha256"]:
+            raise ReleaseError(f"stage3 patch SHA-256 mismatch: {path}")
     shader_patch = plan["textPrinter"]["patch"]
     path = _regular_file(REBUILD.resolve_plan_path(shader_patch["path"]), "TextPrinter patch")
     if sha256_file(path) != shader_patch["sha256"]:
@@ -246,14 +250,25 @@ def validate_inputs(
     return objects
 
 
+@dataclass(frozen=True)
+class Reconstruction:
+    stage1: Path
+    stage1_manifest: dict[str, Any]
+    stage2: Path
+    stage2_manifest: dict[str, Any]
+    final: Path
+    final_manifest: dict[str, Any]
+    stage3_present: bool
+
+
 def reconstruct(
     plan: dict[str, Any],
     *,
     source: Path,
     generated_assets: Path,
     work: Path,
-) -> tuple[Path, dict[str, Any], Path, dict[str, Any]]:
-    """Rebuild stage 1 and stage 2 copies and verify every recorded hash."""
+) -> Reconstruction:
+    """Rebuild every patched source copy and verify every recorded tree hash."""
     log_dir = work / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     stage1 = work / "stage1" / "src"
@@ -283,7 +298,39 @@ def reconstruct(
             f"got {stage2_manifest['sha256']}"
         )
     REBUILD.verify_source_hashes(stage2, plan["stage2"]["compile"], "stage2")
-    return stage1, stage1_manifest, stage2, stage2_manifest
+
+    stage3 = plan.get("stage3")
+    if stage3 is None:
+        return Reconstruction(
+            stage1=stage1,
+            stage1_manifest=stage1_manifest,
+            stage2=stage2,
+            stage2_manifest=stage2_manifest,
+            final=stage2,
+            final_manifest=stage2_manifest,
+            stage3_present=False,
+        )
+
+    final = work / "stage3" / "src"
+    shutil.copytree(stage2, final)
+    for patch in stage3["patches"]:
+        REBUILD.apply_patch(final, REBUILD.resolve_plan_path(patch["path"]), log_dir)
+    final_manifest = REBUILD.tree_manifest(final)
+    if final_manifest["sha256"] != stage3["patchedTreeSHA256"]:
+        raise ReleaseError(
+            "stage 3 patched tree SHA-256 does not match the build plan: "
+            f"got {final_manifest['sha256']}"
+        )
+    REBUILD.verify_source_hashes(final, stage3["compile"], "stage3")
+    return Reconstruction(
+        stage1=stage1,
+        stage1_manifest=stage1_manifest,
+        stage2=stage2,
+        stage2_manifest=stage2_manifest,
+        final=final,
+        final_manifest=final_manifest,
+        stage3_present=True,
+    )
 
 
 def _iter_tree(root: Path, prefix: str) -> Iterable[Entry]:
@@ -335,6 +382,8 @@ def _readme(
     source_name: str,
     stage1: dict[str, Any],
     stage2: dict[str, Any],
+    final: dict[str, Any],
+    stage3_present: bool,
     included_objects: int,
 ) -> bytes:
     pin = plan["sourcePin"]
@@ -364,6 +413,28 @@ def _readme(
             "closed instead of producing an unverified DLL. The MSVC assembly "
             "helper object comes from the external compiler toolchain."
         )
+    if stage3_present:
+        stage3_names = ", ".join(
+            f"`{PurePosixPath(str(patch['path']).replace(chr(92), '/')).name}`"
+            for patch in plan["stage3"]["patches"]
+        )
+        patched_paragraph = f"""- `patched/{source_name}/`: the final patched source used for the payload.
+  It equals the clean tree after base patches 0001-0006, the explicit
+  compatibility edits, the generated `DirectXTK/Inc/SimpleMath.inl`, patch 0007
+  and then the stage-3 patches {stage3_names}. Its tree SHA-256 is
+  `{final["sha256"]}`. The intermediate stage-2 tree (through patch 0007)
+  hashes to `{stage2["sha256"]}`, and the intermediate base candidate tree
+  (patches 0001-0006 plus the edits and generated input) hashes to
+  `{stage1["sha256"]}`."""
+        rebuild_candidates = "the stage-1, stage-2 and stage-3 candidates"
+    else:
+        patched_paragraph = f"""- `patched/{source_name}/`: the final patched source used for the payload.
+  It equals the clean tree after base patches 0001-0006, the explicit
+  compatibility edits, the generated `DirectXTK/Inc/SimpleMath.inl`, and then
+  patch 0007. Its tree SHA-256 is `{final["sha256"]}`.
+  The intermediate base candidate tree (patches 0001-0006 plus the edits and
+  generated input) hashes to `{stage1["sha256"]}`."""
+        rebuild_candidates = "both candidates"
     return f"""# Corresponding source: MacGacha XXMI SRMI payload
 
 Release: `{version}`
@@ -385,12 +456,7 @@ not duplicated here.
 - `upstream/{source_name}/`: the original pinned XXMI Libraries clean source
   tree, with {pin["cleanFileCount"]} files and tree SHA-256
   `{pin["cleanTreeSHA256"]}`.
-- `patched/{source_name}/`: the final patched source used for the payload.
-  It equals the clean tree after base patches 0001-0006, the explicit
-  compatibility edits, the generated `DirectXTK/Inc/SimpleMath.inl`, and then
-  patch 0007. Its tree SHA-256 is `{plan["stage2"]["patchedTreeSHA256"]}`.
-  The intermediate base candidate tree (patches 0001-0006 plus the edits and
-  generated input) hashes to `{stage1["sha256"]}`.
+{patched_paragraph}
 - `generated/DirectXTK/Inc/SimpleMath.inl`: the generated input omitted by the
   clean upstream archive.
 - `compat/xxmi/`: source pins, the build plan, the ordered patches, notices,
@@ -404,7 +470,7 @@ not duplicated here.
 The patches in `compat/xxmi/patches/` apply with `patch -p1 --fuzz=0` in the
 documented order. `scripts/xxmi-rebuild-payload.py` performs the same
 reconstruction, verifies the clean, base and final tree hashes and rebuilds
-both candidates. It requires explicit paths for the clean source, generated
+{rebuild_candidates}. It requires explicit paths for the clean source, generated
 assets, authenticated third-party objects and the local toolchain. The tools
 never download, install, run Wine or touch an installed game or prefix.
 
@@ -458,6 +524,8 @@ def _metadata(
     source_name: str,
     stage1: dict[str, Any],
     stage2: dict[str, Any],
+    final: dict[str, Any],
+    stage3_present: bool,
     objects: list[dict[str, Any]],
     included_objects: bool,
 ) -> bytes:
@@ -490,8 +558,8 @@ def _metadata(
             },
             "patched": {
                 "path": f"patched/{source_name}",
-                "fileCount": stage2["fileCount"],
-                "sha256": stage2["sha256"],
+                "fileCount": final["fileCount"],
+                "sha256": final["sha256"],
             },
         },
         "generatedAssets": plan["stage1"]["generatedAssets"],
@@ -509,6 +577,13 @@ def _metadata(
             "is performed by the archive tool.",
         ],
     }
+    if stage3_present:
+        value["stage3Patches"] = _archived_patches(plan["stage3"]["patches"])
+        value["trees"]["stage2"] = {
+            "archived": False,
+            "fileCount": stage2["fileCount"],
+            "sha256": stage2["sha256"],
+        }
     return (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
 
@@ -520,16 +595,13 @@ def build_entries(
     generated_assets: Path,
     third_party_objects: Path | None,
     objects: list[dict[str, Any]],
-    stage1: Path,
-    stage1_manifest: dict[str, Any],
-    stage2: Path,
-    stage2_manifest: dict[str, Any],
+    reconstruction: Reconstruction,
 ) -> list[Entry]:
     source_name = _archive_source_name(plan)
     tag = version if version.startswith("v") else f"v{version}"
     entries: list[Entry] = []
     entries.extend(_iter_tree(source, f"upstream/{source_name}"))
-    entries.extend(_iter_tree(stage2, f"patched/{source_name}"))
+    entries.extend(_iter_tree(reconstruction.final, f"patched/{source_name}"))
     for asset in plan["stage1"]["generatedAssets"]:
         relative = _relative_path(asset["path"], "generated asset")
         path = _regular_file(generated_assets / relative, "generated asset")
@@ -555,8 +627,10 @@ def build_entries(
         tag=tag,
         plan=plan,
         source_name=source_name,
-        stage1=stage1_manifest,
-        stage2=stage2_manifest,
+        stage1=reconstruction.stage1_manifest,
+        stage2=reconstruction.stage2_manifest,
+        final=reconstruction.final_manifest,
+        stage3_present=reconstruction.stage3_present,
         included_objects=len(objects) if third_party_objects is not None else 0,
     )
     metadata = _metadata(
@@ -564,8 +638,10 @@ def build_entries(
         tag=tag,
         plan=plan,
         source_name=source_name,
-        stage1=stage1_manifest,
-        stage2=stage2_manifest,
+        stage1=reconstruction.stage1_manifest,
+        stage2=reconstruction.stage2_manifest,
+        final=reconstruction.final_manifest,
+        stage3_present=reconstruction.stage3_present,
         objects=objects,
         included_objects=third_party_objects is not None,
     )
@@ -646,7 +722,7 @@ def assemble(
     )
     staging = Path(tempfile.mkdtemp(prefix=".xxmi-source-release-", dir=output_dir))
     try:
-        stage1, stage1_manifest, stage2, stage2_manifest = reconstruct(
+        reconstruction = reconstruct(
             plan,
             source=source,
             generated_assets=generated_assets,
@@ -659,10 +735,7 @@ def assemble(
             generated_assets=generated_assets,
             third_party_objects=third_party_objects,
             objects=objects,
-            stage1=stage1,
-            stage1_manifest=stage1_manifest,
-            stage2=stage2,
-            stage2_manifest=stage2_manifest,
+            reconstruction=reconstruction,
         )
         sums = Entry(
             arcname="SHA256SUMS",
@@ -702,8 +775,10 @@ def assemble(
             "fileCount": len(entries),
             "archiveEntryCount": len(_archive_dirs(entries, root_name)) + len(entries),
             "sourceName": source_name,
-            "stage1TreeSHA256": stage1_manifest["sha256"],
-            "stage2TreeSHA256": stage2_manifest["sha256"],
+            "stage1TreeSHA256": reconstruction.stage1_manifest["sha256"],
+            "stage2TreeSHA256": reconstruction.stage2_manifest["sha256"],
+            "finalTreeSHA256": reconstruction.final_manifest["sha256"],
+            "stage3Present": reconstruction.stage3_present,
             "thirdPartyObjectsIncluded": third_party_objects is not None,
             "tag": tag,
         }
@@ -743,6 +818,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"upstream tree: {plan['sourcePin']['cleanTreeSHA256']}")
     print(f"stage1 tree: {result['stage1TreeSHA256']}")
     print(f"stage2 tree: {result['stage2TreeSHA256']}")
+    if result["stage3Present"]:
+        print(f"stage3 tree: {result['finalTreeSHA256']}")
     print(
         "third-party objects: "
         + ("included" if result["thirdPartyObjectsIncluded"] else "not included")

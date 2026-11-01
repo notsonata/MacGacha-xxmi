@@ -228,7 +228,7 @@ extension ModSupportStore {
         fs: ContainedFileSystem, modsPath: SafeRelativePath) throws {
         try fs.createDirectory(at: modsPath)
         for mod in state.mods where mod.enabled {
-            let sourcePath = try SafeRelativePath(mod.id)
+            let sourcePath = try SafeRelativePath(mod.folderPath)
             guard try library.itemType(at: sourcePath) == .directory else {
                 throw LauncherError.io("An enabled mod is missing")
             }

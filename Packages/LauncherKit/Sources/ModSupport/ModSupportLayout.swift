@@ -9,6 +9,8 @@ enum ModSupportConstants {
     static let runnerTarget = "StarRail.exe"
     static let maximumStateBytes = 1 << 20
     static let maximumSettingsTextBytes = 64 << 10
+    static let maximumSRMIUserConfigBytes = 1 << 20
+    static let maximumSRMIUserConfigEncodedBytes = 2 << 20
     static let maximumModFiles = 50_000
     static let maximumModBytes: Int64 = 2 << 30
     static let maximumModDepth = 64
@@ -37,8 +39,8 @@ struct ModSupportLayout: Sendable {
     }
 
     func ensureDirectories(_ fs: ContainedFileSystem, includeMods: Bool = true) throws {
-        var paths = ["XXMI", "XXMI/Versions", "XXMI/Games/starrail/Packages", "XXMI/Sessions",
-            "XXMI/.staging"]
+        var paths = ["XXMI", "XXMI/Versions", "XXMI/Games/starrail/Packages", "XXMI/Games/starrail/User",
+            "XXMI/Sessions", "XXMI/.staging"]
         if includeMods { paths.append("XXMI/Games/starrail/Mods") }
         for path in paths {
             try fs.createDirectory(at: SafeRelativePath(path))
@@ -52,6 +54,7 @@ struct ModSupportLayout: Sendable {
     }
 
     var statePath: SafeRelativePath { try! SafeRelativePath("XXMI/Games/starrail/state.json") }
+    var userConfigPath: SafeRelativePath { try! SafeRelativePath("XXMI/Games/starrail/User/d3dx-user.json") }
 
     func packagePath(for version: String) -> SafeRelativePath {
         try! SafeRelativePath("XXMI/Versions/\(version)")
@@ -68,6 +71,10 @@ struct ModSupportLayout: Sendable {
     func stagingPath(_ name: String) -> SafeRelativePath {
         try! SafeRelativePath("XXMI/.staging/\(name)")
     }
+
+    func sessionMarkerPath(_ name: String) -> SafeRelativePath {
+        try! SafeRelativePath("XXMI/Sessions/\(name)/.macgacha-session.json")
+    }
 }
 
 struct ModSupportState: Codable, Sendable, Equatable {
@@ -76,6 +83,12 @@ struct ModSupportState: Codable, Sendable, Equatable {
         var name: String
         var enabled: Bool
         var fileCount: Int
+        /// The folder inside the library. Imported mods use their stable ID;
+        /// folders added in Finder keep their own name so a rescan does not
+        /// rename or copy user data.
+        var folder: String?
+
+        var folderPath: String { folder ?? id }
     }
 
     var schemaVersion = 1
@@ -99,12 +112,19 @@ struct ModSupportState: Codable, Sendable, Equatable {
         guard mods.count <= 10_000 else { throw LauncherError.journalCorrupt("mod support state is too large") }
         var ids: Set<String> = []
         var names: Set<String> = []
+        var folders: Set<String> = []
         for mod in mods {
             _ = try SafeIdentifier(mod.id)
+            let folder = mod.folderPath
+            guard let folderPath = try? SafeRelativePath(folder), folderPath.components.count == 1,
+                folderPath.description == folder, validateDisplayName(folder) == folder else {
+                throw LauncherError.journalCorrupt("mod support state has an invalid mod folder")
+            }
             guard mod.fileCount > 0, mod.fileCount <= ModSupportConstants.maximumModFiles,
                 validateDisplayName(mod.name) != nil,
                 ids.insert(mod.id).inserted,
-                names.insert(foldedName(mod.name)).inserted else {
+                names.insert(foldedName(mod.name)).inserted,
+                folders.insert(foldedName(folder)).inserted else {
                 throw LauncherError.journalCorrupt("mod support state has an invalid mod")
             }
         }
@@ -113,7 +133,7 @@ struct ModSupportState: Codable, Sendable, Equatable {
     func snapshot(installedVersion: String?, modsDirectory: URL? = nil) -> ModSupportSnapshot {
         ModSupportSnapshot(installedVersion: installedVersion, injectionEnabled: injectionEnabled,
             riskAcknowledged: riskAcknowledged,
-            mods: mods.map { ManagedMod(id: $0.id, name: $0.name, enabled: $0.enabled, fileCount: $0.fileCount) }
+            mods: mods.map { ManagedMod(id: $0.id, name: $0.name, enabled: $0.enabled, fileCount: $0.fileCount, folderPath: $0.folderPath) }
                 .sorted {
                     let left = $0.name.lowercased(), right = $1.name.lowercased()
                     return left == right ? $0.id < $1.id : left < right

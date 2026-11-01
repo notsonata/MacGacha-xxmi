@@ -23,3 +23,6 @@ __pycache__/
 /release/
 *.dmg
 *.dmg.sha256
+
+# Generated code-navigation index
+/graphify-out/
