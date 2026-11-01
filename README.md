@@ -8,31 +8,50 @@ A native macOS launcher for **Genshin Impact**, **Honkai: Star Rail** and **Zenl
 
 Code and documentation in this repository may be written or modified with assistance from large language models (LLMs) and AI agents. The software is provided under the [GPL-3.0 license](LICENSE), as is, without warranty.
 
-## XXMI support in this fork
+## XXMI mod support
 
-This fork adds an HSR-only XXMI panel through the sidebar wrench and a **Mods** switch above **Play** on the Star Rail screen. Injection is off by default and needs an explicit ban-risk acknowledgment the first time you enable it.
+Use SRMI mods in **Honkai: Star Rail Global** directly from MacGacha. Open the **wrench** in the sidebar to install XXMI and manage your mods.
 
-The panel works offline. **Install**, **Repair** and **Update** use the compatibility package bundled in the app. **Import Package…** loads a verified local folder when you maintain your own build.
+### Getting started
 
-The mod library supports per-mod switches, search, folder and ZIP import, drag and drop, a **Show in Finder** action and removal. **Refresh** adopts folders you add in Finder without moving them; folders that are not safe mods are left in place and reported. Mods live in a library you can move with **Move Mods Folder…**. MacGacha creates a `MacGacha-HSR-Mods` folder at the new location, persists the choice, and copies and verifies before the old folder is removed. Keep that drive connected when importing mods or launching with injection enabled. Each launch uses an immutable snapshot of the enabled mods, so changes apply from the next launch and a running game keeps the mods it started with. SRMI's saved user variables, including per-mod toggle state, are carried into later launches after the game ends. A settings save-back failure keeps recovery pending so it can be retried; a crash can still lose changes SRMI had not written yet.
+1. Select the `d3dmetal-wine11.20-gptk4.0b3` runtime for Star Rail.
+2. Open **XXMI** and click **Install**. The required package is bundled with the app, so installation works offline.
+3. Import a mod folder or ZIP, or drag it into the mod list.
+4. Enable the mods you want, turn on **Mods** above **Play**, and launch the game.
 
-The public release bundles these components:
+Mod injection is off by default. You must acknowledge the account-ban risk before enabling it. See [Is it safe?](#is-it-safe).
 
-- XXMI-Libs-Package v1.2.2, which provides the standalone `3dmloader.dll` injector core and the SRMI source base.
-- SRMI v2.4.3 as the mod runtime payload.
-- The MacGacha HSR compatibility package `2.4.3-macgacha.2`, which carries the focused SRMI patches and the MacGacha hook runner.
+### Managing mods
 
-The launcher uses only the standalone injector core and the hook runner for XXMI. The full XXMI Launcher is not shipped or opened. Source pins, patch order, rebuild dependencies, package generation and independent XXMI package updates are documented in [compat/xxmi/README.md](compat/xxmi/README.md).
+- **Enable or disable mods individually**, search your library, reveal folders in Finder, or remove mods from the XXMI panel.
+- **Refresh** detects folders you add manually. Newly discovered folders start disabled until you enable them.
+- **Move Mods Folder…** relocates your library to a `MacGacha-HSR-Mods` folder at your chosen location. Keep that drive connected when using mods.
+- **Saved SRMI settings** carry over between launches after the game closes. Changes not yet saved by SRMI may be lost if the game crashes.
+- Changes to enabled mods apply on the **next launch**.
 
-Injection is supported only for **Honkai: Star Rail Global** on the `d3dmetal-wine11.20-gptk4.0b3` runtime bundle. Genshin, ZZZ and Mainland China editions keep their normal launch path. For HSR, an enabled injection setting on another backend or Wine bundle blocks launch until injection is disabled or the supported runtime is selected.
+### Updates
 
-Mod support is still early. It was validated with one PoC mod on a live session. That does not establish account safety or support for every mod. The packaged launch flow itself has not been live tested. Treat mod use as potentially bannable, and see [Is it safe?](#is-it-safe).
+Download the latest MacGacha DMG from [Releases](https://github.com/notsonata/MacGacha-xxmi/releases) and replace the app. Open **XXMI → Update** to install the bundled compatibility update while keeping your mods and settings. Use **Repair** to reinstall the current package, or **Import Package…** to install a separately downloaded XXMI package. Automatic app updates are currently unavailable.
 
-Generated payload archives and personal mods are never committed. A distributable build must supply and verify the package locally, and release assets carry the generated archive. See [compat/xxmi/README.md](compat/xxmi/README.md) for the release process. App updates use a fork-specific feed, but that feed is disabled until the fork owner provisions signing keys. Update manually from this fork's releases until then.
+### Included components
+
+| Component | Version |
+|---|---|
+| MacGacha | 0.1.3, build 3 |
+| XXMI Libraries | 1.2.2 |
+| SRMI | 2.4.3 |
+| HSR compatibility package | 2.4.3-macgacha.2 |
+
+MacGacha uses the standalone XXMI injector core and a launch runner. You do not need XXMI Launcher. Mod injection currently supports **Star Rail Global with D3DMetal Wine 11.20 / GPTK 4.0b3**. Genshin Impact, Zenless Zone Zero and Mainland China editions do not yet support XXMI injection.
+
+For source updates and package maintenance, see [the XXMI build guide](compat/xxmi/README.md).
 
 ## Latest update
 
-This release bundles compatibility package `2.4.3-macgacha.2`. It adds core cursor-coordinate validation and fail-closed handling of invalid conditional blocks. The launcher also preserves saved SRMI settings, rescans manually added mod folders, and provides a Mods switch above Play. Host regressions and synthetic graphics checks do not establish that every reported mod symptom is fixed. Mods copied from a PC manager may still require that manager's definitions or clean original INIs. Newly discovered or renamed folders start disabled until you enable them.
+- Added a **Mods** switch above Play and **Refresh** for manually added mod folders.
+- Preserved SRMI settings between launches and made settings recovery retryable.
+- Corrected cursor-coordinate handling and disabled invalid or empty conditional blocks safely.
+- Fixed Finder Reveal for manually added mods and preserved disabled states during library refresh.
 
 ## Downloads
 
@@ -43,7 +62,7 @@ The [current regular release](https://github.com/notsonata/MacGacha-xxmi/release
 | [MacGacha-0.1.3-xxmi.3.dmg](https://github.com/notsonata/MacGacha-xxmi/releases/download/v0.1.3-xxmi.3/MacGacha-0.1.3-xxmi.3.dmg) | App installer, with the verified XXMI package already bundled. |
 | [XXMI-HSR-2.4.3-macgacha.2.zip](https://github.com/notsonata/MacGacha-xxmi/releases/download/v0.1.3-xxmi.3/XXMI-HSR-2.4.3-macgacha.2.zip) | Complete standalone package for independent installation. Extract it and select its `XXMI-HSR-2.4.3-macgacha.2` folder using **XXMI → Import Package…**. |
 
-The standalone package contains `manifest.json`, `hsr-srmi.zip`, instructions and notices. It is different from a mod ZIP, which belongs in the panel's mod importer. [Corresponding XXMI source, raw package files and checksums](https://github.com/notsonata/MacGacha-xxmi/releases/tag/xxmi-2.4.3-macgacha.2) are kept on a separate compatibility release. GitHub also shows two automatic app-source links on the app release. Screenshots are stored in this repository, not attached as downloads.
+The standalone package contains `manifest.json`, `hsr-srmi.zip`, instructions and notices. It is different from a mod ZIP, which belongs in the panel's mod importer. [Corresponding XXMI source, raw package files and checksums](https://github.com/notsonata/MacGacha-xxmi/releases/tag/xxmi-2.4.3-macgacha.2) are kept on a separate compatibility release.
 
 ## Install
 
@@ -60,8 +79,6 @@ xattr -dr com.apple.quarantine /Applications/MacGacha.app
 This only changes MacGacha itself, not any system setting. The first launch can take a while as macOS checks the app.
 
 ## Screenshots
-
-Captured from an earlier installed MacGacha XXMI build. The current release also adds the main-screen Mods switch and Refresh action.
 
 ![HSR selected in MacGacha with the XXMI wrench in the sidebar](assets/screenshots/hsr-xxmi-launcher.png)
 
@@ -132,7 +149,7 @@ Found a bug or have an idea? [Open an issue in this fork](https://github.com/not
 
 Use at your own risk. Running these games under Wine already needs community anti-cheat workarounds (jadeite, a Steam launcher shim). Those workarounds may conflict with HoYoverse's Terms of Service, and an account ban is possible. This project has no reliable ban-rate data and makes no claim that any setup is safe, undetectable or ban-free. If you are worried, try it first with a new free-to-play account.
 
-Mod injection adds a separate risk on top of the Wine workarounds. It loads SRMI into the Star Rail process, which HoYoverse may treat as cheating, and that risk applies even when the Wine workaround itself works as intended. Injection is **off by default**. MacGacha asks you to acknowledge the ban risk before the first enable, and the XXMI panel shows the current setting before you launch. One tested PoC mod says nothing about account safety and does not mean every mod works.
+Mod injection adds a separate risk on top of the Wine workarounds. It loads SRMI into the Star Rail process, which HoYoverse may treat as cheating, and that risk applies even when the Wine workaround itself works as intended. Injection is **off by default**. MacGacha asks you to acknowledge the ban risk before the first enable, and the XXMI panel shows the current setting before you launch.
 
 Without mod injection, MacGacha downloads games only from HoYoverse's official servers and verifies every file. It does not change the game process, never edits `/etc/hosts` and never asks for your password. Each game uses its own Wine prefix with isolated shell-folder links, but Wine is not a security sandbox and host paths can remain accessible through Z:.
 
