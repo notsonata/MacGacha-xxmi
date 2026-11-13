@@ -55,16 +55,17 @@ trap 'rm -rf "$temp_dir"' EXIT
     -c "$source_file" -o "$temp_dir/launcher.obj"
 
 mkdir -p "$(dirname -- "$output")"
-lld_env=()
+link_args=(/entry:srmi_hook_launcher_entry /subsystem:console
+    /nodefaultlib /machine:x64 "/out:$output" "$temp_dir/launcher.obj"
+    "$runtime_root/lib/wine/x86_64-windows/libkernel32.a"
+    "$runtime_root/lib/wine/x86_64-windows/libuser32.a"
+    "$runtime_root/lib/wine/x86_64-windows/libshell32.a")
 if [[ -n "$lld_library_path" ]]; then
     [[ -d "$lld_library_path" ]] || fail "missing lld library path: $lld_library_path"
-    lld_env=("DYLD_LIBRARY_PATH=$lld_library_path")
+    env "DYLD_LIBRARY_PATH=$lld_library_path" "$lld_link" "${link_args[@]}"
+else
+    "$lld_link" "${link_args[@]}"
 fi
-env "${lld_env[@]}" "$lld_link" /entry:srmi_hook_launcher_entry /subsystem:console \
-    /nodefaultlib /machine:x64 "/out:$output" "$temp_dir/launcher.obj" \
-    "$runtime_root/lib/wine/x86_64-windows/libkernel32.a" \
-    "$runtime_root/lib/wine/x86_64-windows/libuser32.a" \
-    "$runtime_root/lib/wine/x86_64-windows/libshell32.a"
 
 file "$output"
 actual=$(shasum -a 256 "$output" | awk '{print $1}')

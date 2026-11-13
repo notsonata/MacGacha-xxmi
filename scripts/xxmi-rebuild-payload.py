@@ -13,7 +13,11 @@ Stages 1 and 2 reproduce the base and NGX-boundary candidates. An optional final
 stage 3 applies the cursor-coordinate and invalid-conditional patches on top of
 stage 2 and recompiles every first-party translation unit; its layout changes
 make stage-2 first-party objects ABI-incompatible, so no stage-2 object is
-reused. Object hashes are verified through their COFF-timestamp-normalised
+reused. When the plan has a ``resources`` record, every stage compiles its own
+DirectX11.res from that stage's tree (the Overlay's three SPRITEFONT fonts and
+VERSIONINFO) with scripts/xxmi-payload-resources.py, links it, and fails
+closed unless the linked DLL holds exactly those resources byte for byte; no
+resource object is reused across stages. Object hashes are verified through their COFF-timestamp-normalised
 form when the plan records one, because Clang writes a wall-clock timestamp
 into every object header while the linked /Brepro candidate stays identical.
 """
@@ -22,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import shutil
@@ -33,10 +38,30 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PLAN = REPO_ROOT / "compat" / "xxmi" / "build" / "payload-build-plan.json"
+RESOURCES_SCRIPT = REPO_ROOT / "scripts" / "xxmi-payload-resources.py"
 
 
 class BuildError(RuntimeError):
     pass
+
+
+def _load_resources_module() -> Any:
+    spec = importlib.util.spec_from_file_location("xxmi_payload_resources", RESOURCES_SCRIPT)
+    if spec is None or spec.loader is None:
+        raise BuildError(f"cannot load {RESOURCES_SCRIPT}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    # Never leave a __pycache__ beside the archived source tools.
+    previous, sys.dont_write_bytecode = sys.dont_write_bytecode, True
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.dont_write_bytecode = previous
+    return module
+
+
+RESOURCES = _load_resources_module()
+STAGES = ("stage1", "stage2", "stage3")
 
 
 def sha256_file(path: Path) -> str:
@@ -107,6 +132,12 @@ def load_plan(path: Path) -> dict[str, Any]:
             raise BuildError("build plan stage3 must list at least one patch")
         if not stage3["compile"]:
             raise BuildError("build plan stage3 must list at least one compile command")
+    resources = plan.get("resources")
+    if resources is not None:
+        try:
+            RESOURCES.validate_spec(resources)
+        except RESOURCES.ResourceError as exc:
+            raise BuildError(str(exc)) from exc
     return plan
 
 
@@ -195,6 +226,27 @@ def validate(
         check_file(path, "generated asset", errors)
         if path.is_file() and sha256_file(path) != asset["sha256"]:
             errors.append(f"generated asset SHA-256 mismatch: {path}")
+    resources = plan.get("resources")
+    for name in STAGES:
+        if name not in plan:
+            continue
+        lines = plan[name]["link"]["rspLines"]
+        if resources is not None and lines.count(RESOURCES.RES_LINK_LINE) != 1:
+            errors.append(f"{name} link must name {RESOURCES.RES_LINK_LINE} exactly once")
+        if resources is None and any(line.lower().endswith(".res") for line in lines):
+            errors.append(f"{name} links a resource object but the plan has no resources record")
+    if resources is not None:
+        for font in resources["fonts"]:
+            path = generated_assets / font["path"]
+            check_file(path, "resource input", errors)
+            if path.is_file():
+                data = path.read_bytes()
+                if (
+                    RESOURCES.sha256_bytes(data) != font["sha256"]
+                    or len(data) != font["size"]
+                    or RESOURCES.git_blob_sha1(data) != font["gitBlobSHA1"]
+                ):
+                    errors.append(f"resource input does not match the plan: {path}")
     for entry in plan["stage1"]["thirdPartyObjects"]:
         path = third_party_objects / entry["path"]
         check_file(path, "third-party object", errors)
@@ -364,6 +416,35 @@ def compile_stage(
         verify_object(command, output)
 
 
+def stage_resources(
+    plan: dict[str, Any], *, source: Path, generated_assets: Path, build: Path, log_dir: Path, label: str
+) -> None:
+    """Compile this stage's DirectX11.res into its own build directory."""
+    resources = plan.get("resources")
+    if resources is None:
+        return
+    try:
+        output = RESOURCES.build_stage_resources(source, generated_assets, resources, build)
+    except RESOURCES.ResourceError as exc:
+        raise BuildError(f"{label} resources: {exc}") from exc
+    (log_dir / f"resources-{label}.log").write_text(
+        f"{output.name} {RESOURCES.sha256_bytes(output.read_bytes())}\n", encoding="utf-8"
+    )
+
+
+def verify_stage_resources(plan: dict[str, Any], dll: Path, label: str) -> dict[str, Any] | None:
+    """Fail closed unless the linked DLL embeds exactly the planned resources."""
+    resources = plan.get("resources")
+    if resources is None:
+        return None
+    try:
+        return RESOURCES.verify_dll_resources(
+            dll.read_bytes(), RESOURCES.expected_dll_resources(resources)
+        )
+    except RESOURCES.ResourceError as exc:
+        raise BuildError(f"{label} candidate resources: {exc}") from exc
+
+
 def link_stage(
     rsp_lines: list[str],
     *,
@@ -460,6 +541,8 @@ def build(
         values=values1,
         c_compiler=c_compiler,
     )
+    stage_resources(plan, source=source1, generated_assets=generated_assets,
+                    build=build1, log_dir=log_dir, label="stage1")
     linked1 = link_stage(
         stage1["link"]["rspLines"],
         objects=objects1,
@@ -470,6 +553,7 @@ def build(
         log_dir=log_dir,
         label="stage1",
     )
+    verify_stage_resources(plan, linked1, "stage1")
     if sha256_file(linked1) != stage1["candidateSHA256"]:
         raise BuildError("stage 1 candidate SHA-256 does not match the verified base build")
 
@@ -494,6 +578,8 @@ def build(
         values=values2,
         c_compiler=c_compiler,
     )
+    stage_resources(plan, source=source2, generated_assets=generated_assets,
+                    build=build2, log_dir=log_dir, label="stage2")
     linked2 = link_stage(
         stage2["link"]["rspLines"],
         objects=objects2,
@@ -504,6 +590,7 @@ def build(
         log_dir=log_dir,
         label="stage2",
     )
+    final_resources = verify_stage_resources(plan, linked2, "stage2")
     if sha256_file(linked2) != stage2["candidateSHA256"]:
         raise BuildError("stage 2 candidate SHA-256 does not match the verified payload")
     final = linked2
@@ -546,6 +633,8 @@ def build(
             values=values3,
             c_compiler=c_compiler,
         )
+        stage_resources(plan, source=source3, generated_assets=generated_assets,
+                        build=build3, log_dir=log_dir, label="stage3")
         linked3 = link_stage(
             stage3["link"]["rspLines"],
             objects=objects3,
@@ -556,6 +645,7 @@ def build(
             log_dir=log_dir,
             label="stage3",
         )
+        final_resources = verify_stage_resources(plan, linked3, "stage3")
         if sha256_file(linked3) != stage3["candidateSHA256"]:
             raise BuildError("stage 3 candidate SHA-256 does not match the verified payload")
         final = linked3
@@ -584,6 +674,21 @@ def build(
     }
     if stage3 is not None:
         manifest["stage3Patches"] = stage3["patches"]
+    if final_resources is not None:
+        manifest["resources"] = {
+            "res": plan["resources"]["res"],
+            "directoryRVA": final_resources["directoryRVA"],
+            "directorySize": final_resources["directorySize"],
+            "entries": [
+                {key: entry[key] for key in ("label", "type", "name", "language", "size", "sha256")}
+                for entry in final_resources["entries"]
+            ],
+        }
+        limitations.append(
+            "DirectX11.res is produced by the first-party scripts/xxmi-payload-resources.py "
+            ".res writer, not rc.exe or llvm-rc; each stage compiles its own copy and the "
+            "linked DLL is verified to contain exactly the planned font and VERSIONINFO bytes."
+        )
     (output_dir / "BUILD-MANIFEST.json").write_text(
         json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
     )

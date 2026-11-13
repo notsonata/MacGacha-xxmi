@@ -3,12 +3,12 @@
   "purpose": "Minimal authenticated source excerpts for the SRMI invalid-conditional fail-closed regression test.",
   "source": {
     "repository": "https://github.com/SpectrumQT/XXMI-Libs-Package",
-    "tag": "v1.2.2",
-    "commit": "a7847eae82aaac32175c9a7d199673d5c9323bcd",
+    "tag": "v1.2.3",
+    "commit": "065dc746c21c71ef48bbc93cb6b90b3dcdf766e6",
     "license": "GPL-3.0-only",
-    "archiveSHA256": "13034531d4855e05273d9fbaf18539ec390432950ebd5986a115e5d3e5d8e275",
-    "cleanTreeSHA256": "77862e4e0dfb8c3c938e44eff60b7aa4832dd88e2852eea8779c7a09772eaae7",
-    "cleanFileCount": 631
+    "archiveSHA256": "00cb5eafa7fae0848595d15ddff933ff0d6290500a0cf56b73b79a13e7d5a09e",
+    "cleanTreeSHA256": "9981b207512f4190192ab5151472fcd76a398855659b14eb74ebfb00828b73aa",
+    "cleanFileCount": 632
   },
   "excerpts": [
     {
@@ -30,26 +30,26 @@
           "sha256": "5ea336884581b62169938e186658bc837201135185ade2044ebe153384f6cefb"
         },
         {
-          "sourceStart": 1323,
-          "sourceEnd": 1330,
+          "sourceStart": 1371,
+          "sourceEnd": 1378,
           "lineCount": 8,
           "sha256": "ae39804e311521e1b3b8c6edc034022c3e5ce8043875ac2ab3917aa9566137b8"
         },
         {
-          "sourceStart": 1595,
-          "sourceEnd": 1603,
+          "sourceStart": 1643,
+          "sourceEnd": 1651,
           "lineCount": 9,
           "sha256": "ec1d60eadbde7ad3d5cf905091939f8ca06e369562a4a49423ac93a513fe0c74"
         },
         {
-          "sourceStart": 1647,
-          "sourceEnd": 1688,
+          "sourceStart": 1695,
+          "sourceEnd": 1736,
           "lineCount": 42,
           "sha256": "d6695f0d591c383a47be4889c05cdc9d60e120711ccaed72a43a4a61efa94742"
         }
       ],
       "fixtureLineCount": 182,
-      "fixtureSHA256": "b15d1f320c3b15ae3e75c07e9b6595a99e6004b0fad00c9830ef6843f384270e"
+      "fixtureSHA256": "27efda5dbbdc85b362cea6d16e37119255b7bb699ef41e600d6927d93a0e9328"
     },
     {
       "path": "DirectX11/CommandList.cpp",
@@ -107,7 +107,7 @@
         }
       ],
       "fixtureLineCount": 590,
-      "fixtureSHA256": "854fc71c7e73c96476a5e677a42c19e0d1df43059509cca6792897a488a1bf76"
+      "fixtureSHA256": "dd7cf353cb1e63b6af92e07dfa375c26ab8eef30e691b06451a51b90a6d9aedb"
     },
     {
       "path": "DirectX11/IniHandler.h",
@@ -123,7 +123,7 @@
         }
       ],
       "fixtureLineCount": 34,
-      "fixtureSHA256": "f82f871b0ba68ccc10dc96fcadfa52dbe7300dd0acfcd2cb18f803a8d1076d91"
+      "fixtureSHA256": "12308d15b508cfb3829a29d2578df6ecefe6d55da7d59029a67f64f3a0898745"
     },
     {
       "path": "DirectX11/IniHandler.cpp",
@@ -151,7 +151,7 @@
         }
       ],
       "fixtureLineCount": 169,
-      "fixtureSHA256": "8040298cc795ac1a0aa2ce7e82e1b5388059caf7ed6efb52b146a9398a5fb1bc"
+      "fixtureSHA256": "e9f7d2b7b66092f969b2b49eca3c66a12866f45063ab177feedda6fc1842e01c"
     },
     {
       "path": "IniWhitespace.inc",
@@ -168,7 +168,7 @@
         }
       ],
       "fixtureLineCount": 13,
-      "fixtureSHA256": "39e27bc187ae91d233fe08ba1d0df92f1e136a3f1c28dadcb4611aef2378984a"
+      "fixtureSHA256": "9d3c0fb2cbb661807a4976135be6d7d6c91480a464a0c97e0d435e6249452c7a"
     }
   ]
 }

@@ -372,6 +372,7 @@ class CheckedInStage3PlanTests(unittest.TestCase):
             [
                 "0009-srmi-cursor-coordinate-contract.patch",
                 "0010-srmi-invalid-conditional-fail-closed.patch",
+                "0011-srmi-conditional-fold-fail-closed.patch",
             ],
         )
         self.assertEqual(
@@ -383,12 +384,16 @@ class CheckedInStage3PlanTests(unittest.TestCase):
             "386e125112e1b4da799d1dd66583ffb4174c87071dfe2ee90a20d8f87c7670d0",
         )
         self.assertEqual(
+            stage3["patches"][2]["sha256"],
+            "ed484b91b38e6234d3b7d07045cf199f02337b4604d15ed52678c9ac7a09a6d9",
+        )
+        self.assertEqual(
             stage3["patchedTreeSHA256"],
-            "8329434de849ffafd9f59a8003a6cea14f8aebbccea3e346538c23373b9b3b44",
+            "40a10ae8123026dd1b34faea7c079a5a464d770a3abb541bb892edfc07e68a65",
         )
         self.assertEqual(
             stage3["candidateSHA256"],
-            "79da3363543a1f12f014922ae4dceaed0173db4405028d6f9b8c0dad92396ad8",
+            "e519f0241d86a45d408838aedf228ea274cb6e4a94ac55e4614bceec0c1a78bc",
         )
 
         serialized = json.dumps(stage3)

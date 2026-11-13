@@ -1,0 +1,466 @@
+{
+  "schemaVersion": 1,
+  "prerequisites": [
+    "Authentic ZZMI v1.5.2 tagged source tree: Core/, ShaderFixes/ and d3dx.ini (49-file source tree, no binary executable content).",
+    "hook-runner.exe compiled locally from compat/xxmi/runner/xxmi_hook_launcher.c with its exact SHA-256 and size pinned; source-only or string-marker-only runners are rejected.",
+    "Shared XXMI core payload/d3d11.dll and payload/d3dcompiler_47.dll from the pinned v1.2.3 source build, plus 3dmloader.dll; the pinned core must satisfy the declared minimum v1.2.0 compatibility floor."
+  ],
+  "package": {
+    "id": "zzz-zzmi",
+    "version": "1.5.2-macgacha.1",
+    "gameID": "zzz",
+    "targetExe": "ZenlessZoneZero.exe",
+    "supportedRuntimeBundleIDs": [
+      "d3dmetal-wine11.20-gptk4.0b3"
+    ],
+    "runnerPath": "hook-runner.exe",
+    "injectorPath": "3dmloader.dll",
+    "payloadPath": "payload/d3d11.dll",
+    "archiveName": "zzz-zzmi.zip",
+    "manifestName": "zzz-zzmi.manifest.json",
+    "payloadRootDirs": [
+      "Core",
+      "ShaderFixes"
+    ],
+    "shaderPath": "Core/ZZMI/Shaders/TextPrinter.hlsl",
+    "license": "GPL-3.0-only",
+    "upstreamVersion": "1.5.2",
+    "upstreamVersionFile": "Core/ZZMI/main.ini",
+    "normalizedD3dxIni": {
+      "path": "d3dx.ini",
+      "size": 56797,
+      "sha256": "1f2e0c14df4eabf8b82e5f1731f28d4d00d0c23e78eb25c0c82cf76eafa933aa"
+    }
+  },
+  "verifiedBinaries": {
+    "runner": {
+      "sourcePath": "compat/xxmi/runner/xxmi_hook_launcher.c",
+      "sourceSHA256": "59b19974eeb8b9ce5801bc94b7cf9b2350ea8ffbfaf10180fb8380be069f71a5",
+      "kind": "source-built PE32+ x86-64 console executable",
+      "role": "Starts MacGacha's resolved ZZZ command under 3dmloader's HookLibrary with an explicit --target-exe ZenlessZoneZero.exe and keeps the hook armed until the game window is ready. The HSR default remains StarRail.exe.",
+      "requiredArguments": [
+        "--target-exe",
+        "StarRail.exe",
+        "ZenlessZoneZero.exe"
+      ],
+      "sha256": "98c202f777848bb4811aac1bd86703db89e1a78fbfcd40653f4ffbcfcc730172",
+      "size": 12800,
+      "build": {
+        "source": "compat/xxmi/runner/xxmi_hook_launcher.c",
+        "compiler": "clang --target=x86_64-w64-windows-gnu",
+        "linker": "rustup lld-link; libLLVM from the same Rust toolchain",
+        "reproducible": true
+      }
+    },
+    "injector": {
+      "sha256": "962ccd38c40ec25415f646de4458a3071b011c22d2ca9f2dbb11d43709ed31f9",
+      "size": 20480,
+      "kind": "PE32+ x86-64 DLL",
+      "role": "XXMI Libraries v1.2.3 signed 3dmloader core injection API (official release bytes; signature verified with the pinned XXMI Libraries key).",
+      "requiredExports": [
+        "DllMain",
+        "HookLibrary",
+        "Inject",
+        "StartProcess",
+        "UnhookLibrary",
+        "WaitForInjection"
+      ],
+      "expectedExports": [
+        "DllMain",
+        "HookLibrary",
+        "Inject",
+        "StartProcess",
+        "UnhookLibrary",
+        "WaitForInjection"
+      ]
+    },
+    "payload": {
+      "sha256": "e519f0241d86a45d408838aedf228ea274cb6e4a94ac55e4614bceec0c1a78bc",
+      "size": 4520960,
+      "kind": "PE32+ x86-64 DLL",
+      "role": "Shared XXMI core D3D11 proxy from the pinned XXMI Libraries build. It is game-configuration driven; ZZMI supplies its own configuration and does not ship the SRMI config.",
+      "resources": [
+        {
+          "label": "IDR_COURIERBOLD",
+          "type": 256,
+          "name": 101,
+          "language": 1033,
+          "size": 38920,
+          "sha256": "f0131ed252c19ed07af5e725e9fba6586993762d3aee7c3cfd9aeb59aa13bc17",
+          "kind": "spritefont"
+        },
+        {
+          "label": "IDR_COURIERSMALL",
+          "type": 256,
+          "name": 102,
+          "language": 1033,
+          "size": 11272,
+          "sha256": "e8da26db1ed85cdf40d0cb8ba4084ab1def7579b51dd01d8877d9e6090b3d1b6",
+          "kind": "spritefont"
+        },
+        {
+          "label": "IDR_ARIAL",
+          "type": 256,
+          "name": 103,
+          "language": 1033,
+          "size": 23048,
+          "sha256": "f1282f6ec6008029ee95455678c871c739b1e573f409a8c20692d9b445098017",
+          "kind": "spritefont"
+        },
+        {
+          "label": "VS_VERSION_INFO",
+          "type": 16,
+          "name": 1,
+          "language": 2055,
+          "size": 756,
+          "sha256": "7177a1813aec57aabb2f9bbc5f6916ec14ed46c6d30461236097c88c2fa50860",
+          "kind": "version"
+        }
+      ]
+    },
+    "d3dcompiler": {
+      "sha256": "86110ac1986ff0e4f35e1a797a3ede99233c4a5bd12edacc6dd45750e22b4171",
+      "size": 4927168,
+      "kind": "PE32+ x86-64 DLL",
+      "role": "XXMI Libraries signed shader compiler companion DLL."
+    },
+    "textPrinterShader": {
+      "sha256": "c0646169031816ea38c98c9b54fae2394b138ee6ffb9bf6e931055504b7606b9",
+      "size": 13470,
+      "kind": "HLSL source",
+      "path": "Core/ZZMI/Shaders/TextPrinter.hlsl",
+      "role": "Unmodified ZZMI 1.5.2 TextPrinter shader (unchanged since 1.5.0). The SRMI numeric-literal shader patch is not applied to ZZMI."
+    },
+    "config": {
+      "d3dxIni": {
+        "path": "d3dx.ini",
+        "sha256": "b24f911d8fcf34b8d15444e2bc8ff6d711a84718cbb7ec3be7929f841a4e2856",
+        "size": 56834
+      },
+      "mainIni": {
+        "path": "Core/ZZMI/main.ini",
+        "sha256": "117b190ce85841bf94f0b6f53402eb9fd42c01b48fd08c31edf7d5e3261e5077",
+        "size": 11325
+      },
+      "helpIni": {
+        "path": "Core/ZZMI/help.ini",
+        "sha256": "29ac07c8dd6678eb8ee2d17aa53a97fe6c390e3361c43461f23b62f8d88e584c"
+      },
+      "patchIni": {
+        "path": "Core/ZZMI/d3dx_patch.ini",
+        "sha256": "1b9628cfe59555574a4522f53081647fd0cc5bb1ddcb16d07fbe72165ad2072c"
+      },
+      "shaderFixesSample": {
+        "path": "ShaderFixes/Sucrose.png",
+        "sha256": "684cd54aeeadfde40d3739a806999365f09e31a9d22398781443192c0fbee31b",
+        "size": 465369
+      }
+    }
+  },
+  "sourcePins": {
+    "zzmiPackage": {
+      "repository": "https://github.com/leotorrez/ZZMI-Package",
+      "tag": "v1.5.2",
+      "commit": "0f761241b20279849267eb179c7c2a05cff521c4",
+      "archiveSHA256": "e9a539b15c477cf6b0fbae3fa6f45c83c41d63b0a4232fa5d97b0b55300241bd",
+      "license": "GPL-3.0-only",
+      "provides": [
+        "Core/ZZMI runtime configuration, libraries and shaders",
+        "Core/Debugger runtime configuration",
+        "ShaderFixes stock sample",
+        "d3dx.ini baseline targeting ZenlessZoneZero.exe"
+      ],
+      "sourceArchiveURL": "https://codeload.github.com/leotorrez/ZZMI-Package/tar.gz/refs/tags/v1.5.2",
+      "sourceTreeSHA256": "dfd1e79c4c6da19619bcdcab60b77eafa3cbd5bd98ab5b5bc8bc98f575d9ed2f",
+      "sourceTreeFileCount": 49,
+      "licenseSHA256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
+      "releaseAsset": {
+        "name": "ZZMI-PACKAGE-v1.5.2.zip",
+        "url": "https://github.com/leotorrez/ZZMI-Package/releases/download/v1.5.2/ZZMI-PACKAGE-v1.5.2.zip",
+        "sha256": "dce62cee6fb83eda25c29ac5e0dbd37055efeae0c6e5d90fa0133a4b52a57edc",
+        "size": 568159,
+        "signatureVerified": "ECDSA P-384/SHA-256 release-body signature verified against the ZZMI public key pinned in XXMI Launcher v2.4.9 and v2.5.0 zzmi_package.py (DER key SHA-256 dae47a5536da123bfdf3d2f870f56599e144f13b3eea25c9c2632d16b30579a7).",
+        "note": "Verified GitHub release asset. It holds the same 47 configuration files as the tagged tree with CRLF line endings, plus three precompiled Core/ZZMI/Libraries/Shapekeys/Shaders/*.bin shader blobs, and no source-control metadata or LICENSE; packaging uses the tagged source tree, not this ZIP."
+      }
+    },
+    "sharedXxmiCore": {
+      "pins": "compat/xxmi/source-pins.json",
+      "buildPlan": "compat/xxmi/build/payload-build-plan.json",
+      "verifiedPayloadSHA256": "e519f0241d86a45d408838aedf228ea274cb6e4a94ac55e4614bceec0c1a78bc",
+      "role": "The shared XXMI core DLL is game-configuration driven. ZZMI uses this pinned core with its own config instead of the SRMI config.",
+      "license": "GPL-3.0-only",
+      "commit": "065dc746c21c71ef48bbc93cb6b90b3dcdf766e6",
+      "version": "1.2.3",
+      "verifiedCompilerSHA256": "86110ac1986ff0e4f35e1a797a3ede99233c4a5bd12edacc6dd45750e22b4171",
+      "verifiedInjectorSHA256": "962ccd38c40ec25415f646de4458a3071b011c22d2ca9f2dbb11d43709ed31f9"
+    },
+    "macgachaRunner": {
+      "path": "compat/xxmi/runner/xxmi_hook_launcher.c",
+      "sha256": "59b19974eeb8b9ce5801bc94b7cf9b2350ea8ffbfaf10180fb8380be069f71a5",
+      "license": "GPL-3.0-only",
+      "role": "MacGacha-authored target-aware runner source. It accepts only StarRail.exe (default) or ZenlessZoneZero.exe and applies the chosen identity to every preflight, process, module and window check.",
+      "compiledSHA256": "98c202f777848bb4811aac1bd86703db89e1a78fbfcd40653f4ffbcfcc730172",
+      "compiledSize": 12800
+    }
+  },
+  "build": {
+    "cleanSourceTreeSHA256": "9981b207512f4190192ab5151472fcd76a398855659b14eb74ebfb00828b73aa",
+    "cleanSourceTreeFileCount": 632,
+    "baseCandidateSHA256": "1f0166741d9e76fe8e43c59b2eef5e15e40a8e9e15259eef718cfa19e0cbfaba",
+    "basePatchedTreeSHA256": "802f54a5963e049d909aeed36a3387401ee88e185c8c43c533dd5d84b6fbe7e5",
+    "finalCandidateSHA256": "e519f0241d86a45d408838aedf228ea274cb6e4a94ac55e4614bceec0c1a78bc",
+    "plan": "compat/xxmi/build/payload-build-plan.json",
+    "finalPatchedTreeSHA256": "40a10ae8123026dd1b34faea7c079a5a464d770a3abb541bb892edfc07e68a65",
+    "finalStage": 3
+  },
+  "sources": {
+    "zzmi-package": {
+      "repository": "https://github.com/leotorrez/ZZMI-Package",
+      "tag": "v1.5.2",
+      "commit": "0f761241b20279849267eb179c7c2a05cff521c4",
+      "archiveSHA256": "e9a539b15c477cf6b0fbae3fa6f45c83c41d63b0a4232fa5d97b0b55300241bd",
+      "license": "GPL-3.0-only",
+      "sourceArchiveURL": "https://codeload.github.com/leotorrez/ZZMI-Package/tar.gz/refs/tags/v1.5.2",
+      "sourceArchiveSHA256": "e9a539b15c477cf6b0fbae3fa6f45c83c41d63b0a4232fa5d97b0b55300241bd",
+      "sourceTreeSHA256": "dfd1e79c4c6da19619bcdcab60b77eafa3cbd5bd98ab5b5bc8bc98f575d9ed2f",
+      "sourceTreeFileCount": 49,
+      "licenseSHA256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
+      "releaseAsset": {
+        "name": "ZZMI-PACKAGE-v1.5.2.zip",
+        "url": "https://github.com/leotorrez/ZZMI-Package/releases/download/v1.5.2/ZZMI-PACKAGE-v1.5.2.zip",
+        "sha256": "dce62cee6fb83eda25c29ac5e0dbd37055efeae0c6e5d90fa0133a4b52a57edc",
+        "size": 568159,
+        "signatureVerified": "ECDSA P-384/SHA-256 release-body signature verified against the ZZMI public key pinned in XXMI Launcher v2.4.9 and v2.5.0 zzmi_package.py (DER key SHA-256 dae47a5536da123bfdf3d2f870f56599e144f13b3eea25c9c2632d16b30579a7).",
+        "note": "Verified GitHub release asset. It holds the same 47 configuration files as the tagged tree with CRLF line endings, plus three precompiled Core/ZZMI/Libraries/Shapekeys/Shaders/*.bin shader blobs, and no source-control metadata or LICENSE; packaging uses the tagged source tree, not this ZIP."
+      }
+    },
+    "shared-xxmi-core": {
+      "pins": "compat/xxmi/source-pins.json",
+      "buildPlan": "compat/xxmi/build/payload-build-plan.json",
+      "verifiedPayloadSHA256": "e519f0241d86a45d408838aedf228ea274cb6e4a94ac55e4614bceec0c1a78bc",
+      "license": "GPL-3.0-only",
+      "commit": "065dc746c21c71ef48bbc93cb6b90b3dcdf766e6",
+      "version": "1.2.3",
+      "verifiedCompilerSHA256": "86110ac1986ff0e4f35e1a797a3ede99233c4a5bd12edacc6dd45750e22b4171",
+      "verifiedInjectorSHA256": "962ccd38c40ec25415f646de4458a3071b011c22d2ca9f2dbb11d43709ed31f9"
+    },
+    "macgacha-xxmi-runner": {
+      "path": "compat/xxmi/runner/xxmi_hook_launcher.c",
+      "sha256": "59b19974eeb8b9ce5801bc94b7cf9b2350ea8ffbfaf10180fb8380be069f71a5",
+      "license": "GPL-3.0-only",
+      "compiledSHA256": "98c202f777848bb4811aac1bd86703db89e1a78fbfcd40653f4ffbcfcc730172",
+      "compiledSize": 12800
+    }
+  },
+  "coreCompatibility": {
+    "minimumVersion": "1.2.0",
+    "pinnedVersion": "1.2.3",
+    "basis": "ZZMI 1.5.2 uses XXMI Libraries INI language features declared in the upstream v1.2.0 release notes: pool variables and full-range pool assignment. The 1.5.2 changes (HP bar characters/hp, SlotFix, main) use no newer core feature.",
+    "upstreamRelease": "https://github.com/SpectrumQT/XXMI-Libs-Package/releases/tag/v1.2.0",
+    "featureChecks": [
+      {
+        "path": "Core/ZZMI/Libraries/SlotFix/SlotFix.ini",
+        "contains": "$Poolt[*]",
+        "introducedIn": "1.2.0",
+        "source": "XXMI Libraries v1.2.0 release notes: Full range operations for pool resources and variables (PoolFoo[*] = null)."
+      }
+    ]
+  },
+  "runtimeSource": {
+    "sourceTreeSHA256": "dfd1e79c4c6da19619bcdcab60b77eafa3cbd5bd98ab5b5bc8bc98f575d9ed2f",
+    "sourceTreeFileCount": 49,
+    "runtimeRoot": "ZZMI",
+    "runtimeFileCount": 47,
+    "runtimeTreeSHA256": "b0b3aba54579c2d35435cad4388b0bbd372cd3c3bee54ee3716ec1c6cf4d2ed3"
+  },
+  "runtimeFiles": {
+    "Core/Debugger/Debugger.ini": {
+      "size": 4763,
+      "sha256": "04f34bc60806530a250a207deac5a7ad0b9ab430d556978a6e618e2361c50efe"
+    },
+    "Core/Debugger/Fonts/LiberationSans-Bold.dds": {
+      "size": 98432,
+      "sha256": "c84ba851f4d8ca5741f09364fc02e474c4db1acc3fcf58a77d7f43aac9f8b8ea"
+    },
+    "Core/Debugger/Fonts/LiberationSans-Bold.png": {
+      "size": 4697,
+      "sha256": "ff2945c739dde8c3d4e0873b7c51123548356a11ebdd4d68aee49901afea4947"
+    },
+    "Core/Debugger/Shaders/Debugger.hlsl": {
+      "size": 311,
+      "sha256": "7e0260a153f90591d8297a919b834f4554247e002e8583afa629fe8ae88035f1"
+    },
+    "Core/Debugger/Shaders/debug_cb.hlsl": {
+      "size": 10912,
+      "sha256": "acaaf8dc3c8bb0b074126675ebf8c7bfaea1c091ee90e570a11ba685c05bf60b"
+    },
+    "Core/Debugger/debug_cb.ini": {
+      "size": 3318,
+      "sha256": "56af2e5ba1c98a506c78120d56d58d76df2fa3e31cf51be4bbf4ae8e5565892c"
+    },
+    "Core/ZZMI/FlatNormalMap.dds": {
+      "size": 65684,
+      "sha256": "9a9f338d2c75ed73770382fd57c011ef52d972131a0a8ca9f7818214f13d898f"
+    },
+    "Core/ZZMI/Fonts/LiberationSans-Bold.dds": {
+      "size": 98432,
+      "sha256": "c84ba851f4d8ca5741f09364fc02e474c4db1acc3fcf58a77d7f43aac9f8b8ea"
+    },
+    "Core/ZZMI/Fonts/LiberationSans-Bold.png": {
+      "size": 4697,
+      "sha256": "ff2945c739dde8c3d4e0873b7c51123548356a11ebdd4d68aee49901afea4947"
+    },
+    "Core/ZZMI/Libraries/HP bar/Includes.ini": {
+      "size": 77,
+      "sha256": "7f803322f0aa695d5b77b218cdfe72c9ad78c2b57ef606539b725503781a8992"
+    },
+    "Core/ZZMI/Libraries/HP bar/OrderIds.CS.hlsl": {
+      "size": 1565,
+      "sha256": "399d3632c3b4aa6ae5bdf4c5ae78ee466965ba71ab450a2b2851dc4460eda787"
+    },
+    "Core/ZZMI/Libraries/HP bar/SummHp.CS.hlsl": {
+      "size": 1711,
+      "sha256": "80fb30955c3d71fb468f1968742e9595ee8aa218b8fc9a1c3a9f9caff5a80b42"
+    },
+    "Core/ZZMI/Libraries/HP bar/characters.ini": {
+      "size": 14716,
+      "sha256": "d160a99eab7844ad8c0a823dc4dadbcc0641d771eeb1b263c67ecb8acaea209a"
+    },
+    "Core/ZZMI/Libraries/HP bar/hp.ini": {
+      "size": 3632,
+      "sha256": "20a08fd78a7094ecde3d809b7e5d07351d5dfd95a8964b82314909e367a36f10"
+    },
+    "Core/ZZMI/Libraries/Includes.ini": {
+      "size": 143,
+      "sha256": "6c385dc162b3111ec3b9e7c732d108851bebce4767dadece22bf5cf9ce1b25ee"
+    },
+    "Core/ZZMI/Libraries/SlotFix/Aliases.ini": {
+      "size": 945,
+      "sha256": "96e58ce9a9619f16b382f6004f88bca6a95c18bedafd28216ff1334c185c2af9"
+    },
+    "Core/ZZMI/Libraries/SlotFix/Includes.ini": {
+      "size": 177,
+      "sha256": "55fea021ac4a3e92c6d86a25833d1cdb3fc777fb92061e7318dc3509a980d66b"
+    },
+    "Core/ZZMI/Libraries/SlotFix/Matches.ini": {
+      "size": 3318,
+      "sha256": "702c86220faf9acc123476dad021464d27fa87f2b74676768ff4d9a5c2402633"
+    },
+    "Core/ZZMI/Libraries/SlotFix/Resources/EmptyGlowMap.dds": {
+      "size": 65684,
+      "sha256": "698909d4acc247785f7b36b59aba9ce9d57bb2460dcaccea8abf41cb3456dd38"
+    },
+    "Core/ZZMI/Libraries/SlotFix/Resources/FlatNormalMap.dds": {
+      "size": 65684,
+      "sha256": "9a9f338d2c75ed73770382fd57c011ef52d972131a0a8ca9f7818214f13d898f"
+    },
+    "Core/ZZMI/Libraries/SlotFix/Resources/Resources.ini": {
+      "size": 831,
+      "sha256": "b0869e4edbbbd54bfa0ab780443683f6a8d8420a5249d8963ad81e08b24d9cfa"
+    },
+    "Core/ZZMI/Libraries/SlotFix/SlotFix.ini": {
+      "size": 35027,
+      "sha256": "344c7f175d1907bb65f5af97d82ce9b6092ff38c677610a0312f27469b575aec"
+    },
+    "Core/ZZMI/Libraries/TTLib/GameHooks.ini": {
+      "size": 8024,
+      "sha256": "ca3bb7b06a3f717cc5ebbe8026e0d96342331dbec98feb61e95c963e9fc8bd69"
+    },
+    "Core/ZZMI/Libraries/TTLib/Includes.ini": {
+      "size": 130,
+      "sha256": "8bbc5692459cae0531b7b2dd5f778818870cbcc2813c79d5f31ef2452940b4bb"
+    },
+    "Core/ZZMI/Libraries/TTLib/Shaders/CaptureMask.hlsl": {
+      "size": 1161,
+      "sha256": "10f47fd4b13a8caf1f827a7e39b5e1f56fac3cd935c3e74b1fa6ebe93cb56b07"
+    },
+    "Core/ZZMI/Libraries/TTLib/Shaders/ColorCommon.hlsli": {
+      "size": 858,
+      "sha256": "d26f8e3ca7708626dad0769a996cef4e5dcd99703e4f0e5ea1eb0ca6dbebcbe0"
+    },
+    "Core/ZZMI/Libraries/TTLib/Shaders/LateWorldComposite.hlsl": {
+      "size": 749,
+      "sha256": "d1ad0b52f84a15ae123b7d6bee2910342ea98eb43384aaebe8cfb23c0ce71018"
+    },
+    "Core/ZZMI/Libraries/TTLib/Shaders/LateWorldFlipDetect.hlsl": {
+      "size": 1188,
+      "sha256": "0eea89f39ba8c0663ce8ba571dfa3ad09f2a686f27625ac5b2d77347b064e1e8"
+    },
+    "Core/ZZMI/Libraries/TTLib/Shaders/LayerCommon.hlsli": {
+      "size": 1668,
+      "sha256": "23ca8b3da326e725a2c6ad572b26c6cc957f75afefebc712877053b093f74e57"
+    },
+    "Core/ZZMI/Libraries/TTLib/Shaders/NativeComposite.hlsl": {
+      "size": 679,
+      "sha256": "134a59eff46f8567da0239a9464435fa3314aa7aa91bf8b44c3843b2f47e5846"
+    },
+    "Core/ZZMI/Libraries/TTLib/Shaders/PortraitComposite.hlsl": {
+      "size": 182,
+      "sha256": "6be2aa4da65b8228ebe1a3e4ebc7538c790d0ad90fb32b5a8c6385f3cf466303"
+    },
+    "Core/ZZMI/Libraries/TTLib/Shaders/UIPlacementMeasure.hlsl": {
+      "size": 1467,
+      "sha256": "1c5127f87f4a0a69588efefdcb27672a6df8403e4b09be1fe4f0c34d0e643188"
+    },
+    "Core/ZZMI/Libraries/TTLib/Shaders/UIPlacementPublish.hlsl": {
+      "size": 473,
+      "sha256": "58c305579aed1f0ed8f7cd9dc8ea4fad2512218131086b3bc59355ec3419307d"
+    },
+    "Core/ZZMI/Libraries/TTLib/Shaders/portrait_blit_vs.hlsl": {
+      "size": 491,
+      "sha256": "83a5fb282dee843318d82c78b2e84919f6440f31d754b21d997ba844e11e989f"
+    },
+    "Core/ZZMI/Libraries/TTLib/TTLib.ini": {
+      "size": 45767,
+      "sha256": "a303eb33dbd3bc7489d515bf20a044a97044663d3ec4abd87c95c81ad68418cb"
+    },
+    "Core/ZZMI/Libraries/TTLib/UIPlacement.ini": {
+      "size": 8765,
+      "sha256": "3f6fa485f1350ae57ea3261e73509c578628fdd067b5ed5762e22654de824d0a"
+    },
+    "Core/ZZMI/Notifications/HuntingModeGuide.md": {
+      "size": 846,
+      "sha256": "403442c3a7c44a01886b1e3c38b0c5a8ad0f2802e6743ffee916d854dcb93bc7"
+    },
+    "Core/ZZMI/Notifications/UserGuide.md": {
+      "size": 669,
+      "sha256": "e878265fe22169677dbae637d692b9c32d69246805647222663f4e5374b77229"
+    },
+    "Core/ZZMI/Shaders/ShapeKeyApply.hlsl": {
+      "size": 961,
+      "sha256": "ff59d0dab75d7b5921c6a105612a4b754d058611063216cbd220ab4b8178e376"
+    },
+    "Core/ZZMI/Shaders/ShapeKeyCBOverride.hlsl": {
+      "size": 1427,
+      "sha256": "993a4e007828e64be0f828cfa850e4f4a5aec705f1fd1fd24da6d1f1664b2baf"
+    },
+    "Core/ZZMI/Shaders/ShapeKeyMultiplier.hlsl": {
+      "size": 1325,
+      "sha256": "7ec7bd68b911f5117ff970acf0ea992619bb3df80b9d22fc1cd52c0c0dca27c5"
+    },
+    "Core/ZZMI/Shaders/TextPrinter.hlsl": {
+      "size": 13470,
+      "sha256": "c0646169031816ea38c98c9b54fae2394b138ee6ffb9bf6e931055504b7606b9"
+    },
+    "Core/ZZMI/d3dx_patch.ini": {
+      "size": 164,
+      "sha256": "1b9628cfe59555574a4522f53081647fd0cc5bb1ddcb16d07fbe72165ad2072c"
+    },
+    "Core/ZZMI/help.ini": {
+      "size": 2873,
+      "sha256": "29ac07c8dd6678eb8ee2d17aa53a97fe6c390e3361c43461f23b62f8d88e584c"
+    },
+    "Core/ZZMI/main.ini": {
+      "size": 11325,
+      "sha256": "117b190ce85841bf94f0b6f53402eb9fd42c01b48fd08c31edf7d5e3261e5077"
+    },
+    "ShaderFixes/Sucrose.png": {
+      "size": 465369,
+      "sha256": "684cd54aeeadfde40d3739a806999365f09e31a9d22398781443192c0fbee31b"
+    },
+    "d3dx.ini": {
+      "size": 56834,
+      "sha256": "b24f911d8fcf34b8d15444e2bc8ff6d711a84718cbb7ec3be7929f841a4e2856"
+    }
+  }
+}

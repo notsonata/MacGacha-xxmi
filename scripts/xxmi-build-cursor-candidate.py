@@ -44,8 +44,8 @@ DEFAULT_CONDITIONAL_PATCH = (
     REPO_ROOT / "compat" / "xxmi" / "patches" / "0010-srmi-invalid-conditional-fail-closed.patch"
 )
 DEFAULT_SOURCE = Path(
-    "/private/tmp/xxmi-libs-v1.2.2-source/"
-    "XXMI-Libs-Package-a7847eae82aaac32175c9a7d199673d5c9323bcd"
+    "/private/tmp/xxmi-libs-v1.2.3-source/"
+    "XXMI-Libs-Package-065dc746c21c71ef48bbc93cb6b90b3dcdf766e6"
 )
 DEFAULT_GENERATED_ASSETS = Path("/private/tmp/xxmi-libs-v1.2.2-build")
 DEFAULT_THIRD_PARTY_OBJECTS = Path("/private/tmp/srmi-cxx-smoke-20261030")
@@ -552,6 +552,13 @@ def build_once(
         [(entry["path"], entry["sha256"]) for entry in third_party_entries]
     )
 
+    # The plan's link lines name this build's own DirectX11.res (the Overlay
+    # fonts); compile it from the patched tree rather than reusing a stage's.
+    try:
+        module.stage_resources(plan, source=source_tree, generated_assets=generated_assets,
+                               build=build_dir, log_dir=logs, label="cursor-candidate")
+    except module.BuildError as exc:
+        raise BuildError(str(exc)) from exc
     rsp_path = build_dir / "xxmi-cursor-candidate.rsp"
     rsp_lines = module.expand(plan["stage2"]["link"]["rspLines"], values)
     rsp_path.write_text("\n".join(rsp_lines) + "\n", encoding="utf-8")
@@ -575,6 +582,10 @@ def build_once(
     if not linked.is_file() or not map_path.is_file():
         raise BuildError("linker did not produce d3d11.dll and d3d11.map")
 
+    try:
+        module.verify_stage_resources(plan, linked, "cursor-candidate")
+    except module.BuildError as exc:
+        raise BuildError(str(exc)) from exc
     candidate = candidate_dir / "d3d11.dll"
     shutil.copy2(linked, candidate)
     candidate_hash = sha256_file(candidate)

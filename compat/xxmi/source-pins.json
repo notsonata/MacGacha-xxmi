@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "package": {
     "id": "hsr-srmi",
-    "version": "2.4.3-macgacha.2",
+    "version": "2.4.3-macgacha.3",
     "gameID": "starrail",
     "supportedRuntimeBundleIDs": [
       "d3dmetal-wine11.20-gptk4.0b3"
@@ -22,10 +22,10 @@
       "role": "Starts MacGacha's resolved StarRail command under 3dmloader's HookLibrary and keeps the hook armed until the game window is ready."
     },
     "injector": {
-      "sha256": "6713ad15447ed94467f6e72570b530b509f0c4e3c107c853c5e0c8bfeb8d02c4",
+      "sha256": "962ccd38c40ec25415f646de4458a3071b011c22d2ca9f2dbb11d43709ed31f9",
       "size": 20480,
       "kind": "PE32+ x86-64 DLL",
-      "role": "XXMI Libraries 3dmloader core injection API.",
+      "role": "XXMI Libraries v1.2.3 signed 3dmloader core injection API (official release bytes; signature verified with the pinned XXMI Libraries key).",
       "requiredExports": [
         "DllMain",
         "HookLibrary",
@@ -44,16 +44,54 @@
       ]
     },
     "payload": {
-      "sha256": "79da3363543a1f12f014922ae4dceaed0173db4405028d6f9b8c0dad92396ad8",
-      "size": 4959232,
+      "sha256": "e519f0241d86a45d408838aedf228ea274cb6e4a94ac55e4614bceec0c1a78bc",
+      "size": 4520960,
       "kind": "PE32+ x86-64 DLL",
-      "role": "SRMI 2.4.3 D3D11 proxy with core cursor-coordinate and fail-closed conditional corrections; reproducible stage-3 build, pending live mod acceptance."
+      "role": "SRMI 2.4.3 D3D11 proxy built from XXMI Libraries v1.2.3 with patches 0001-0007 and 0009-0011 (cursor-coordinate, fail-closed conditional and conditional-fold guards) and the authenticated DirectX11.rc Overlay SPRITEFONT and VERSIONINFO resources; reproducible stage-3 build linked with source-rebuilt third-party objects, pending live acceptance.",
+      "resources": [
+        {
+          "label": "IDR_COURIERBOLD",
+          "type": 256,
+          "name": 101,
+          "language": 1033,
+          "size": 38920,
+          "sha256": "f0131ed252c19ed07af5e725e9fba6586993762d3aee7c3cfd9aeb59aa13bc17",
+          "kind": "spritefont"
+        },
+        {
+          "label": "IDR_COURIERSMALL",
+          "type": 256,
+          "name": 102,
+          "language": 1033,
+          "size": 11272,
+          "sha256": "e8da26db1ed85cdf40d0cb8ba4084ab1def7579b51dd01d8877d9e6090b3d1b6",
+          "kind": "spritefont"
+        },
+        {
+          "label": "IDR_ARIAL",
+          "type": 256,
+          "name": 103,
+          "language": 1033,
+          "size": 23048,
+          "sha256": "f1282f6ec6008029ee95455678c871c739b1e573f409a8c20692d9b445098017",
+          "kind": "spritefont"
+        },
+        {
+          "label": "VS_VERSION_INFO",
+          "type": 16,
+          "name": 1,
+          "language": 2055,
+          "size": 756,
+          "sha256": "7177a1813aec57aabb2f9bbc5f6916ec14ed46c6d30461236097c88c2fa50860",
+          "kind": "version"
+        }
+      ]
     },
     "d3dcompiler": {
       "sha256": "86110ac1986ff0e4f35e1a797a3ede99233c4a5bd12edacc6dd45750e22b4171",
       "size": 4927168,
       "kind": "PE32+ x86-64 DLL",
-      "role": "XXMI Libraries signed shader compiler companion DLL."
+      "role": "XXMI Libraries signed shader compiler companion DLL (byte-identical in v1.2.2 and v1.2.3)."
     },
     "textPrinterShader": {
       "sha256": "c5071500a8fb3f9ce8f2f86464ef410a83c0074145d87fc761237ec04c93d313",
@@ -65,10 +103,10 @@
   "sourcePins": {
     "xxmiLibsPackage": {
       "repository": "https://github.com/SpectrumQT/XXMI-Libs-Package",
-      "tag": "v1.2.2",
-      "commit": "a7847eae82aaac32175c9a7d199673d5c9323bcd",
-      "archiveSHA256": "13034531d4855e05273d9fbaf18539ec390432950ebd5986a115e5d3e5d8e275",
-      "manifestSHA256": "63906652cd3f271ad6bbce678e73d264f3ee8bdf54e7e915d0d4cd134b8f4631",
+      "tag": "v1.2.3",
+      "commit": "065dc746c21c71ef48bbc93cb6b90b3dcdf766e6",
+      "archiveSHA256": "00cb5eafa7fae0848595d15ddff933ff0d6290500a0cf56b73b79a13e7d5a09e",
+      "manifestSHA256": "eec75b28bdb8b1f278d7861410938e84ae7b9ecfeff352614c11f196081cf106",
       "license": "GPL-3.0-only",
       "provides": [
         "3dmloader.dll",
@@ -88,8 +126,9 @@
     },
     "xxmiLauncher": {
       "repository": "https://github.com/SpectrumQT/XXMI-Launcher",
-      "tag": "v2.4.9",
-      "role": "Hook/start/wait/verify lifecycle reference only; no launcher UI or package code is shipped.",
+      "tag": "v2.5.0",
+      "commit": "4f5ef31cc237394568119f9feac2d99f44665466",
+      "role": "Hook/start/wait/verify lifecycle reference only; no launcher UI or package code is shipped. src/xxmi_launcher/core/utils/dll_injector.py is unchanged from v2.4.9.",
       "license": "GPL-3.0-only"
     },
     "macgachaRunner": {
@@ -102,32 +141,32 @@
       {
         "path": "compat/xxmi/patches/0001-srmi-chain-path-overflow.patch",
         "sha256": "36975d974a630baa6337eca7ca3c152bbb3175be64666608473c904576ced455",
-        "appliesTo": "XXMI Libraries v1.2.2 clean source"
+        "appliesTo": "XXMI Libraries v1.2.3 clean source"
       },
       {
         "path": "compat/xxmi/patches/0002-srmi-dxgi-factory-reentrancy.patch",
         "sha256": "b37ea86fd4ce3db4fc1fdbb75a70b3b14b6d6e91ef62817f2ceb75055617ffa7",
-        "appliesTo": "XXMI Libraries v1.2.2 clean source"
+        "appliesTo": "XXMI Libraries v1.2.3 clean source"
       },
       {
         "path": "compat/xxmi/patches/0003-srmi-global-lock-initialization.patch",
         "sha256": "78b2ec6150790f821f7ab7ba179515f65939bb6ebe62d0b642b581913450f584",
-        "appliesTo": "XXMI Libraries v1.2.2 clean source"
+        "appliesTo": "XXMI Libraries v1.2.3 clean source"
       },
       {
         "path": "compat/xxmi/patches/0004-srmi-device-identity-fallback.patch",
         "sha256": "79079ab2d73cc1d558672adb05774294aa123fd9c0d57d4aa5ab0a20de10821f",
-        "appliesTo": "XXMI Libraries v1.2.2 clean source"
+        "appliesTo": "XXMI Libraries v1.2.3 clean source"
       },
       {
         "path": "compat/xxmi/patches/0005-srmi-resizebuffers-argument-diagnostic.patch",
         "sha256": "195fcd3123e02ae2bf37155046fb76d4b46c752c89089ab5413c2168aac577ec",
-        "appliesTo": "XXMI Libraries v1.2.2 clean source"
+        "appliesTo": "XXMI Libraries v1.2.3 clean source"
       },
       {
         "path": "compat/xxmi/patches/0006-srmi-resource-release-callback.patch",
         "sha256": "5be55e910da0d29f73aa048ac914aa5d1b748fff3464a6a576a99eea9a17c787",
-        "appliesTo": "XXMI Libraries v1.2.2 clean source"
+        "appliesTo": "XXMI Libraries v1.2.3 clean source"
       },
       {
         "path": "compat/xxmi/patches/0007-srmi-ngx-context-boundary.patch",
@@ -148,26 +187,31 @@
         "path": "compat/xxmi/patches/0010-srmi-invalid-conditional-fail-closed.patch",
         "sha256": "386e125112e1b4da799d1dd66583ffb4174c87071dfe2ee90a20d8f87c7670d0",
         "appliesTo": "DLL stage 3 after patches 0001-0007 and 0009"
+      },
+      {
+        "path": "compat/xxmi/patches/0011-srmi-conditional-fold-fail-closed.patch",
+        "sha256": "ed484b91b38e6234d3b7d07045cf199f02337b4604d15ed52678c9ac7a09a6d9",
+        "appliesTo": "DLL stage 3 after patches 0001-0007, 0009 and 0010 (XXMI Libraries v1.2.3 conditional-chain folding)"
       }
     ]
   },
   "build": {
-    "cleanSourceTreeSHA256": "77862e4e0dfb8c3c938e44eff60b7aa4832dd88e2852eea8779c7a09772eaae7",
-    "cleanSourceTreeFileCount": 631,
-    "baseCandidateSHA256": "c563d40c29bd039b4b22219488996218cf5e87dc176020a728914ccc9e89dff1",
-    "basePatchedTreeSHA256": "26258343d4f1b1d9706840d08fa19e75c851e40ec4d87871fe8ec29287b342a7",
-    "finalCandidateSHA256": "79da3363543a1f12f014922ae4dceaed0173db4405028d6f9b8c0dad92396ad8",
+    "cleanSourceTreeSHA256": "9981b207512f4190192ab5151472fcd76a398855659b14eb74ebfb00828b73aa",
+    "cleanSourceTreeFileCount": 632,
+    "baseCandidateSHA256": "1f0166741d9e76fe8e43c59b2eef5e15e40a8e9e15259eef718cfa19e0cbfaba",
+    "basePatchedTreeSHA256": "802f54a5963e049d909aeed36a3387401ee88e185c8c43c533dd5d84b6fbe7e5",
+    "finalCandidateSHA256": "e519f0241d86a45d408838aedf228ea274cb6e4a94ac55e4614bceec0c1a78bc",
     "plan": "compat/xxmi/build/payload-build-plan.json",
-    "finalPatchedTreeSHA256": "8329434de849ffafd9f59a8003a6cea14f8aebbccea3e346538c23373b9b3b44",
+    "finalPatchedTreeSHA256": "40a10ae8123026dd1b34faea7c079a5a464d770a3abb541bb892edfc07e68a65",
     "finalStage": 3
   },
   "sources": {
     "xxmi-libs-package": {
       "repository": "https://github.com/SpectrumQT/XXMI-Libs-Package",
-      "tag": "v1.2.2",
-      "commit": "a7847eae82aaac32175c9a7d199673d5c9323bcd",
-      "archiveSHA256": "13034531d4855e05273d9fbaf18539ec390432950ebd5986a115e5d3e5d8e275",
-      "manifestSHA256": "63906652cd3f271ad6bbce678e73d264f3ee8bdf54e7e915d0d4cd134b8f4631",
+      "tag": "v1.2.3",
+      "commit": "065dc746c21c71ef48bbc93cb6b90b3dcdf766e6",
+      "archiveSHA256": "00cb5eafa7fae0848595d15ddff933ff0d6290500a0cf56b73b79a13e7d5a09e",
+      "manifestSHA256": "eec75b28bdb8b1f278d7861410938e84ae7b9ecfeff352614c11f196081cf106",
       "license": "GPL-3.0-only"
     },
     "srmi-package": {
@@ -193,7 +237,8 @@
         "0007-srmi-ngx-context-boundary.patch",
         "0008-srmi-text-printer-vkd3d-all-literals.patch",
         "0009-srmi-cursor-coordinate-contract.patch",
-        "0010-srmi-invalid-conditional-fail-closed.patch"
+        "0010-srmi-invalid-conditional-fail-closed.patch",
+        "0011-srmi-conditional-fold-fail-closed.patch"
       ],
       "sha256": {
         "0001-srmi-chain-path-overflow.patch": "36975d974a630baa6337eca7ca3c152bbb3175be64666608473c904576ced455",
@@ -205,7 +250,8 @@
         "0007-srmi-ngx-context-boundary.patch": "091434eb2238327b019adfd60aa70bd9ce499194125a37dd406bfebe1a883c1e",
         "0008-srmi-text-printer-vkd3d-all-literals.patch": "9742669f5ad116d9551fac4dbbb6332df7377cf3064113f85def8871aeba74b6",
         "0009-srmi-cursor-coordinate-contract.patch": "a808d2154af9c32ff81163fb25d12ada58969891a76feabab7ce64f8ec5c9f27",
-        "0010-srmi-invalid-conditional-fail-closed.patch": "386e125112e1b4da799d1dd66583ffb4174c87071dfe2ee90a20d8f87c7670d0"
+        "0010-srmi-invalid-conditional-fail-closed.patch": "386e125112e1b4da799d1dd66583ffb4174c87071dfe2ee90a20d8f87c7670d0",
+        "0011-srmi-conditional-fold-fail-closed.patch": "ed484b91b38e6234d3b7d07045cf199f02337b4604d15ed52678c9ac7a09a6d9"
       }
     }
   }

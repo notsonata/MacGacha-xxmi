@@ -3,12 +3,12 @@
   "purpose": "Minimal authenticated source excerpts for the SRMI cursor coordinate contract regression test.",
   "source": {
     "repository": "https://github.com/SpectrumQT/XXMI-Libs-Package",
-    "tag": "v1.2.2",
-    "commit": "a7847eae82aaac32175c9a7d199673d5c9323bcd",
+    "tag": "v1.2.3",
+    "commit": "065dc746c21c71ef48bbc93cb6b90b3dcdf766e6",
     "license": "GPL-3.0-only",
-    "archiveSHA256": "13034531d4855e05273d9fbaf18539ec390432950ebd5986a115e5d3e5d8e275",
-    "cleanTreeSHA256": "77862e4e0dfb8c3c938e44eff60b7aa4832dd88e2852eea8779c7a09772eaae7",
-    "cleanFileCount": 631
+    "archiveSHA256": "00cb5eafa7fae0848595d15ddff933ff0d6290500a0cf56b73b79a13e7d5a09e",
+    "cleanTreeSHA256": "9981b207512f4190192ab5151472fcd76a398855659b14eb74ebfb00828b73aa",
+    "cleanFileCount": 632
   },
   "excerpts": [
     {
@@ -24,14 +24,14 @@
           "sha256": "ac46c956ac9f7a1f92c5dbfb5d1898458f3ed06e425706d74aea81df4502a498"
         },
         {
-          "sourceStart": 1447,
-          "sourceEnd": 1500,
+          "sourceStart": 1495,
+          "sourceEnd": 1548,
           "lineCount": 54,
           "sha256": "a663281fd319051125210aea831a5d384cd471b8fe7a0fb2358f9a8c60476514"
         }
       ],
       "fixtureLineCount": 110,
-      "fixtureSHA256": "1568419676eac235e31830ae62ebbd90a8cb04dbfb88fd642273a14bf0de7b99"
+      "fixtureSHA256": "67448a2762a028a9a1f7a59e3914b7b98d13b7a11f7f9c0d6f26bb80f93d19f0"
     },
     {
       "path": "DirectX11/CommandList.cpp",
@@ -53,7 +53,7 @@
         }
       ],
       "fixtureLineCount": 316,
-      "fixtureSHA256": "2cb275c90d1b1eea97a9947a04ebea85a6c70926d3909aac88a5b64039db7cd0"
+      "fixtureSHA256": "d465de96b73421678abec5a296ad6022ca7d2cc5fe1242da3d31668ae52fc8ed"
     }
   ]
 }

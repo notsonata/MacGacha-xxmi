@@ -44,8 +44,8 @@ CURSOR_PATCH = PATCH_DIR / "0009-srmi-cursor-coordinate-contract.patch"
 REBUILD_SCRIPT = REPO / "scripts" / "xxmi-rebuild-payload.py"
 
 DEFAULT_SOURCE = Path(
-    "/private/tmp/xxmi-libs-v1.2.2-source/"
-    "XXMI-Libs-Package-a7847eae82aaac32175c9a7d199673d5c9323bcd"
+    "/private/tmp/xxmi-libs-v1.2.3-source/"
+    "XXMI-Libs-Package-065dc746c21c71ef48bbc93cb6b90b3dcdf766e6"
 )
 
 CONFIG_KEYS = (

@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 1,
+  "purpose": "Minimal authenticated source excerpts for the SRMI conditional-chain folding fail-closed regression test (patch 0011).",
+  "source": {
+    "repository": "https://github.com/SpectrumQT/XXMI-Libs-Package",
+    "tag": "v1.2.3",
+    "commit": "065dc746c21c71ef48bbc93cb6b90b3dcdf766e6",
+    "license": "GPL-3.0-only",
+    "archiveSHA256": "00cb5eafa7fae0848595d15ddff933ff0d6290500a0cf56b73b79a13e7d5a09e",
+    "cleanTreeSHA256": "9981b207512f4190192ab5151472fcd76a398855659b14eb74ebfb00828b73aa",
+    "cleanFileCount": 632
+  },
+  "excerpts": [
+    {
+      "path": "DirectX11/CommandList.h",
+      "bannerLineCount": 6,
+      "segmentSeparator": "// --- verbatim source excerpt gap ---\n",
+      "segmentSeparatorLineCount": 1,
+      "segments": [
+        {
+          "sourceStart": 1176,
+          "sourceEnd": 1182,
+          "lineCount": 7,
+          "sha256": "1fa3b085804a21d9b89a3242777cc781a18eb98b95f6a555bdc7785f5d0ef101"
+        },
+        {
+          "sourceStart": 1247,
+          "sourceEnd": 1283,
+          "lineCount": 37,
+          "sha256": "8bf86f7d8afcd23fff176d897c80c55484fab8ad8ad17d59adf1dac04f6d410e"
+        }
+      ],
+      "fixtureLineCount": 51,
+      "fixtureSHA256": "c83ef8b286555fb6b8d8d90bf5ce34f45ca607cd9f4a147bb268c692685302a0"
+    },
+    {
+      "path": "DirectX11/CommandList.cpp",
+      "bannerLineCount": 6,
+      "segmentSeparator": "// --- verbatim source excerpt gap ---\n",
+      "segmentSeparatorLineCount": 1,
+      "segments": [
+        {
+          "sourceStart": 500,
+          "sourceEnd": 576,
+          "lineCount": 77,
+          "sha256": "d7f9ae102621d257bffebe00dfac1b3fde4d8584a5490b4b611d96d2bdff0939"
+        },
+        {
+          "sourceStart": 12863,
+          "sourceEnd": 13234,
+          "lineCount": 372,
+          "sha256": "635f08ca896d154039abccdd412687a72a22a209bec9ac48f7d744fd38d6738c"
+        }
+      ],
+      "fixtureLineCount": 456,
+      "fixtureSHA256": "84aecf609e0b26f480f1aaaa1d207d8a4b3979fe21cd301e38b4075604d0c4fd"
+    }
+  ]
+}

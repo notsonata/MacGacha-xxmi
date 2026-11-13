@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // MacGacha — https://github.com/deruta74/MacGacha — see LICENSE and NOTICE (additional term under GPL section 7(b)).
-// Verbatim excerpt from XXMI-Libs-Package v1.2.2 (commit a7847eae82aaac32175c9a7d199673d5c9323bcd), GPL-3.0-only.
+// Verbatim excerpt from XXMI-Libs-Package v1.2.3 (commit 065dc746c21c71ef48bbc93cb6b90b3dcdf766e6), GPL-3.0-only.
 // Source: https://github.com/SpectrumQT/XXMI-Libs-Package
 // Minimal offline fixture for the SRMI cursor contract regression. See PROVENANCE.json.
 // Do not edit the excerpted source lines by hand.

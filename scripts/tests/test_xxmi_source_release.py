@@ -279,10 +279,12 @@ class SourceReleaseTests(unittest.TestCase):
 
         for required in (
             "compat/xxmi/source-pins.json",
+            "compat/xxmi/zzz-source-pins.json",
             "compat/xxmi/NOTICE.md",
             "compat/xxmi/README.md",
             "compat/xxmi/build/payload-build-plan.json",
             "compat/xxmi/runner/srmi_hook_launcher.c",
+            "compat/xxmi/runner/xxmi_hook_launcher.c",
             "scripts/xxmi-rebuild-payload.py",
             "scripts/xxmi-package.py",
             "scripts/xxmi-build-runner.sh",
@@ -369,6 +371,74 @@ class SourceReleaseTests(unittest.TestCase):
         )
         readme = (top / "README.md").read_text(encoding="utf-8")
         self.assertIn("third-party-objects/", readme)
+
+    def _declare_third_party_source(self) -> Path:
+        archive = write(self.root / "inputs" / "third-party-src.zip", b"PK\x05\x06" + b"\0" * 18)
+        self.fixture.plan["provenance"] = {
+            "thirdPartyObjects": {
+                "sourceCorrespondence": [
+                    {
+                        "name": "third-party-rebuild.zip",
+                        "sha256": sha(archive.read_bytes()),
+                        "description": "rebuilt third-party sources",
+                    }
+                ]
+            }
+        }
+        self.fixture.plan_path.write_text(
+            json.dumps(self.fixture.plan, indent=2) + "\n", encoding="utf-8"
+        )
+        return archive
+
+    def test_includes_declared_third_party_source_correspondence(self):
+        archive = self._declare_third_party_source()
+        output = self.root / "out"
+        self.assertEqual(
+            self.fixture.run(output, extra=["--third-party-source", str(archive)]), 0
+        )
+        extract = self.root / "extract"
+        extract.mkdir()
+        with tarfile.open(self.fixture.archive(output)) as opened:
+            opened.extractall(extract)
+        top = extract / "xxmi-libs-v1.2.2-test-source-9.9.9-test"
+        self.assertEqual(
+            (top / "third-party-source" / "third-party-rebuild.zip").read_bytes(),
+            archive.read_bytes(),
+        )
+        metadata = json.loads((top / "SOURCE-RELEASE.json").read_text(encoding="utf-8"))
+        self.assertEqual(
+            metadata["thirdPartySource"],
+            [
+                {
+                    "path": "third-party-source/third-party-rebuild.zip",
+                    "sha256": sha(archive.read_bytes()),
+                    "description": "rebuilt third-party sources",
+                }
+            ],
+        )
+        readme = (top / "README.md").read_text(encoding="utf-8")
+        self.assertIn("third-party-source/third-party-rebuild.zip", readme)
+        self.assertIn("rebuilt from source", readme)
+        self.assertNotIn(str(archive.parent).encode(), self.fixture.archive(output).read_bytes())
+
+    def test_rejects_missing_declared_third_party_source(self):
+        self._declare_third_party_source()
+        output = self.root / "out"
+        self.assertEqual(self.fixture.run(output), 1)
+        self.assertFalse(any(output.glob("*.tar.gz")) if output.exists() else False)
+
+    def test_rejects_altered_third_party_source(self):
+        archive = self._declare_third_party_source()
+        archive.write_bytes(archive.read_bytes() + b"x")
+        self.assertEqual(
+            self.fixture.run(self.root / "out", extra=["--third-party-source", str(archive)]), 1
+        )
+
+    def test_rejects_undeclared_third_party_source(self):
+        extra = write(self.root / "inputs" / "extra.zip", b"extra")
+        self.assertEqual(
+            self.fixture.run(self.root / "out", extra=["--third-party-source", str(extra)]), 1
+        )
 
     def test_rejects_clean_tree_hash_mismatch(self):
         write(self.fixture.source / "a.txt", "tampered\n")
@@ -481,6 +551,134 @@ class SourceReleaseStage3Tests(unittest.TestCase):
         output = self.root / "out"
         self.assertEqual(self.fixture.run(output), 1)
         self.assertFalse(output.exists() and any(output.iterdir()))
+
+
+class ZzzSourceReleaseTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="xxmi-source-release-zzz-tests-")
+        self.root = Path(self.temp.name)
+        self.fixture = Fixture(self.root)
+        self.zzz_source = self.root / "zzz-source"
+        write(
+            self.zzz_source / "ZZMI" / "Core" / "ZZMI" / "main.ini",
+            'data = "ZZMI 1.5.0 (PRESS F12 TO SHOW GUIDE)"\nglobal $version = 1.50\n',
+        )
+        write(self.zzz_source / "ZZMI" / "Core" / "ZZMI" / "help.ini", "[Help]\n")
+        write(
+            self.zzz_source / "ZZMI" / "Core" / "ZZMI" / "Libraries" / "SlotFix" / "SlotFix.ini",
+            "[Reset]\n$Poolt[*] = $default_filter\n",
+        )
+        write(self.zzz_source / "ZZMI" / "d3dx.ini", "[Loader]\ntarget = ZenlessZoneZero.exe\n")
+        write(self.zzz_source / "ZZMI" / "ShaderFixes" / "Sucrose.png", b"png\n")
+        write(self.zzz_source / "LICENSE", "GPL-3.0-only fixture\n")
+        tree = xxmi_source_release.REBUILD.tree_manifest(self.zzz_source)
+        self.pins = {
+            "schemaVersion": 1,
+            "package": {"id": "zzz-zzmi", "upstreamVersion": "1.5.0"},
+            "verifiedBinaries": {
+                "config": {
+                    "mainIni": {
+                        "path": "Core/ZZMI/main.ini",
+                        "sha256": sha((self.zzz_source / "ZZMI" / "Core" / "ZZMI" / "main.ini").read_bytes()),
+                        "size": (self.zzz_source / "ZZMI" / "Core" / "ZZMI" / "main.ini").stat().st_size,
+                    },
+                    "d3dxIni": {
+                        "path": "d3dx.ini",
+                        "sha256": sha((self.zzz_source / "ZZMI" / "d3dx.ini").read_bytes()),
+                        "size": (self.zzz_source / "ZZMI" / "d3dx.ini").stat().st_size,
+                    },
+                }
+            },
+            "sourcePins": {
+                "zzmiPackage": {
+                    "repository": "https://example.invalid/ZZMI-Package",
+                    "tag": "v1.5.0",
+                    "commit": "b" * 40,
+                    "sourceTreeSHA256": tree["sha256"],
+                    "sourceTreeFileCount": tree["fileCount"],
+                    "sourceArchiveSHA256": "c" * 64,
+                    "sourceArchiveURL": "https://example.invalid/zzmi.tar.gz",
+                    "licenseSHA256": sha((self.zzz_source / "LICENSE").read_bytes()),
+                }
+            },
+        }
+        self.pins_path = write(
+            self.root / "zzz-pins.json", json.dumps(self.pins, indent=2) + "\n"
+        )
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def run_with_zzz(self, output: Path, *, zzz_source: Path | None = None):
+        extra = [
+            "--zzz-source", str(zzz_source or self.zzz_source),
+            "--zzz-pins", str(self.pins_path),
+        ]
+        return self.fixture.run(output, extra=extra)
+
+    def extract(self, output: Path) -> Path:
+        archive = self.fixture.archive(output)
+        destination = self.root / "extract-zzz"
+        destination.mkdir()
+        with tarfile.open(archive) as opened:
+            opened.extractall(destination)
+        return destination / "xxmi-libs-v1.2.2-test-source-9.9.9-test"
+
+    def test_includes_complete_zzz_source_tree_and_license(self):
+        output = self.root / "out"
+        self.assertEqual(self.run_with_zzz(output), 0)
+        top = self.extract(output)
+        source_name = "ZZMI-Package-" + "b" * 40
+        zzz = top / "zzz" / "upstream" / source_name
+        self.assertTrue((zzz / "ZZMI" / "ShaderFixes" / "Sucrose.png").is_file())
+        self.assertTrue((zzz / "LICENSE").is_file())
+        metadata = json.loads((top / "SOURCE-RELEASE.json").read_text(encoding="utf-8"))
+        self.assertTrue(metadata["zzzSource"]["included"])
+        self.assertEqual(metadata["zzzSource"]["treeSHA256"], self.pins["sourcePins"]["zzmiPackage"]["sourceTreeSHA256"])
+        self.assertEqual(metadata["zzzSource"]["fileCount"], self.pins["sourcePins"]["zzmiPackage"]["sourceTreeFileCount"])
+        self.assertEqual(metadata["zzzSource"]["licenseSHA256"], self.pins["sourcePins"]["zzmiPackage"]["licenseSHA256"])
+        readme = (top / "README.md").read_text(encoding="utf-8")
+        self.assertIn("complete pinned ZZMI", readme)
+        self.assertIn(source_name, readme)
+
+    def test_without_zzz_source_does_not_claim_complete_zzz_inputs(self):
+        output = self.root / "out"
+        self.assertEqual(self.fixture.run(output), 0)
+        archive = self.fixture.archive(output)
+        destination = self.root / "extract-no-zzz"
+        destination.mkdir()
+        with tarfile.open(archive) as opened:
+            opened.extractall(destination)
+        top = destination / "xxmi-libs-v1.2.2-test-source-9.9.9-test"
+        metadata = json.loads((top / "SOURCE-RELEASE.json").read_text(encoding="utf-8"))
+        self.assertFalse(metadata["zzzSource"]["included"])
+        readme = (top / "README.md").read_text(encoding="utf-8")
+        self.assertIn("No ZZMI source tree was supplied", readme)
+        self.assertFalse((top / "zzz").exists())
+
+    def test_rejects_zzz_tree_hash_mismatch(self):
+        write(self.zzz_source / "ZZMI" / "extra.ini", "extra\n")
+        output = self.root / "out"
+        self.assertEqual(self.run_with_zzz(output), 1)
+        self.assertFalse(output.exists() and any(output.iterdir()))
+
+    def test_rejects_zzz_executable_content(self):
+        write(self.zzz_source / "ZZMI" / "tool.exe", b"MZ")
+        output = self.root / "out"
+        self.assertEqual(self.run_with_zzz(output), 1)
+        self.assertFalse(output.exists() and any(output.iterdir()))
+
+    def test_rejects_zzz_version_mismatch(self):
+        main = self.zzz_source / "ZZMI" / "Core" / "ZZMI" / "main.ini"
+        write(main, 'data = "ZZMI 1.4.9"\nglobal $version = 1.49\n')
+        tree = xxmi_source_release.REBUILD.tree_manifest(self.zzz_source)
+        self.pins["sourcePins"]["zzmiPackage"]["sourceTreeSHA256"] = tree["sha256"]
+        self.pins["sourcePins"]["zzmiPackage"]["sourceTreeFileCount"] = tree["fileCount"]
+        self.pins["verifiedBinaries"]["config"]["mainIni"]["sha256"] = sha(main.read_bytes())
+        self.pins["verifiedBinaries"]["config"]["mainIni"]["size"] = main.stat().st_size
+        self.pins_path.write_text(json.dumps(self.pins, indent=2) + "\n", encoding="utf-8")
+        output = self.root / "out"
+        self.assertEqual(self.run_with_zzz(output), 1)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,47 @@
+# SRMI conditional-chain folding fail-closed guard
+# Base: XXMI-Libs-Package 065dc746c21c71ef48bbc93cb6b90b3dcdf766e6 (XXMI Libraries v1.2.3)
+# Apply from the XXMI Libs package root after patches 0001-0007, 0009 and 0010:
+#   patch -p1 --fuzz=0 < 0011-srmi-conditional-fold-fail-closed.patch
+#
+# XXMI Libraries v1.2.3 folds an if/elif/else chain whose branches each drive
+# one fixed shader-resource slot into a ConditionalSlotCopyOperation, so the
+# chain can sit inside a ShaderResourceBindBatch/FetchBatch. The fold
+# (collect_conditional_chain, called from fold_conditional_slot_chain and
+# merge_shader_resource_batches) reads if_cmd->expression and the folded
+# operation evaluates it at run time. Upstream has no notion of an invalid
+# condition.
+#
+# Patch 0010 keeps an unparseable if/elif as an IfCommand with
+# expression_valid false that runs neither branch. optimise_command_lists()
+# calls every command's optimise(), then removes noop commands (0010 makes an
+# invalid IfCommand a noop with both branches cleared), and only then calls
+# merge_shader_resource_batches(). With that order an invalid node is gone
+# before batching. This patch makes the fold itself fail closed as well, so a
+# future change of that order, or any other caller, can never batch an
+# invalid branch or evaluate a partial expression: an IfCommand with
+# expression_valid false, at the head of a chain or as a nested elif, makes
+# the whole chain unfoldable, and it then stays a hard break that runs
+# through IfCommand::run().
+#
+# Valid chains fold exactly as upstream. No class layout changes; the stage-3
+# full first-party rebuild already covers this translation unit.
+#
+--- a/DirectX11/CommandList.cpp
++++ b/DirectX11/CommandList.cpp
+@@ -13104,6 +13104,16 @@
+ static bool collect_conditional_chain(IfCommand *if_cmd, BatchDirection direction, CommandListPhase phase,
+ 	std::vector<ConditionalSlotBranch> &out)
+ {
++	// An "if"/"elif" whose condition did not parse (patch 0010) must never
++	// be folded. The folded operation would evaluate the partial expression
++	// at run time, and a batch would run the branch it picked. Left unfolded
++	// it stays a hard break: IfCommand::run() runs neither branch. The
++	// optimiser normally removes such a node before batching; this keeps
++	// batching fail-closed even if that order ever changes. Checked first,
++	// before anything reads the expression.
++	if (!if_cmd->expression_valid)
++		return false;
++
+ 	if (expression_reads_pipeline(if_cmd->expression.evaluatable.get()))
+ 		return false;
+ 

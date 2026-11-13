@@ -5,8 +5,12 @@
 
 The archive contains the original pinned XXMI Libraries source, the final
 patched source reconstructed from the checked-in patch order, the generated
-input the clean archive omits, the compatibility pins, patches, notices,
-licenses and build plan, and the source rebuild/package/runner tools.
+input and the authenticated Overlay SPRITEFONT resource inputs the clean
+archive omits, the compatibility pins, patches, notices,
+licenses and build plan, and the source rebuild/package/runner tools. An
+explicit --zzz-source tree adds the complete pinned ZZMI configuration source
+and GPL license for a ZZZ candidate package; without it the archive states that
+the shared core source does not cover ZZMI.
 
 This command never downloads, installs, launches Wine, runs the game, edits a
 clean or reference tree, or rebuilds the DLL. It only reads authenticated
@@ -35,6 +39,7 @@ from typing import Any, Iterable
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PLAN = REPO_ROOT / "compat" / "xxmi" / "build" / "payload-build-plan.json"
+DEFAULT_ZZZ_PINS = REPO_ROOT / "compat" / "xxmi" / "zzz-source-pins.json"
 APP_REPOSITORY = "https://github.com/notsonata/MacGacha-xxmi"
 ARCHIVE_SCHEMA_VERSION = 1
 SAFE_VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$")
@@ -42,17 +47,22 @@ SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 FORBIDDEN_NAMES = {".git", ".svn", ".hg", ".DS_Store", "__pycache__", "d3dx_user.ini"}
 FORBIDDEN_DIRS = {"Mods", "ShaderCache", "ShaderFixes"}
 FORBIDDEN_SUFFIXES = {".pyc", ".pyo", ".orig", ".rej", ".log", ".dmp", ".pdb", ".ilk"}
+EXECUTABLE_SUFFIXES = {".exe", ".dll", ".sys", ".msi", ".zip", ".7z"}
 
 COMPAT_FILES = (
     "compat/xxmi/README.md",
     "compat/xxmi/NOTICE.md",
     "compat/xxmi/source-pins.json",
+    "compat/xxmi/zzz-source-pins.json",
     "compat/xxmi/build/payload-build-plan.json",
     "compat/xxmi/runner/srmi_hook_launcher.c",
+    "compat/xxmi/runner/xxmi_hook_launcher.c",
 )
 SCRIPT_FILES = (
     "scripts/xxmi-rebuild-payload.py",
+    "scripts/xxmi-derive-build-plan.py",
     "scripts/xxmi-package.py",
+    "scripts/xxmi-payload-resources.py",
     "scripts/xxmi-build-runner.sh",
     "scripts/xxmi-source-release.py",
 )
@@ -142,8 +152,15 @@ def _forbidden(name: str) -> bool:
     )
 
 
-def scan_tree(root: Path, label: str) -> None:
+def scan_tree(
+    root: Path,
+    label: str,
+    *,
+    allowed_directories: set[str] | None = None,
+    reject_executables: bool = False,
+) -> None:
     """Reject symlinks, special files and personal build artifacts."""
+    allowed_directories = allowed_directories or set()
     if not root.is_dir():
         raise ReleaseError(f"missing {label}: {root}")
     if root.is_symlink():
@@ -157,6 +174,8 @@ def scan_tree(root: Path, label: str) -> None:
                 raise ReleaseError(f"{label} contains a symlink: {path}")
             if not stat.S_ISDIR(info.st_mode):
                 raise ReleaseError(f"{label} contains a non-directory: {path}")
+            if name in allowed_directories:
+                continue
             if _forbidden(name):
                 raise ReleaseError(f"{label} contains a forbidden directory: {path}")
         for name in filenames:
@@ -166,6 +185,8 @@ def scan_tree(root: Path, label: str) -> None:
                 raise ReleaseError(f"{label} contains a symlink: {path}")
             if not stat.S_ISREG(info.st_mode):
                 raise ReleaseError(f"{label} contains a special file: {path}")
+            if reject_executables and Path(name).suffix.lower() in EXECUTABLE_SUFFIXES:
+                raise ReleaseError(f"{label} contains executable content: {path}")
             if _forbidden(name):
                 raise ReleaseError(f"{label} contains a forbidden file: {path}")
 
@@ -185,6 +206,83 @@ def _archive_source_name(plan: dict[str, Any]) -> str:
     if not SAFE_NAME.fullmatch(name):
         raise ReleaseError("source pin does not yield a safe archive directory name")
     return name
+
+
+def declared_third_party_sources(plan: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return the third-party source-correspondence archives the plan pins."""
+    declared = (
+        plan.get("provenance", {})
+        .get("thirdPartyObjects", {})
+        .get("sourceCorrespondence", [])
+    )
+    if not isinstance(declared, list):
+        raise ReleaseError("plan provenance sourceCorrespondence must be a list")
+    names: set[str] = set()
+    for entry in declared:
+        if not isinstance(entry, dict):
+            raise ReleaseError("plan sourceCorrespondence entries must be objects")
+        name = entry.get("name")
+        if not isinstance(name, str) or not SAFE_NAME.fullmatch(name):
+            raise ReleaseError(f"unsafe third-party source archive name: {name!r}")
+        if name in names:
+            raise ReleaseError(f"duplicate third-party source archive name: {name}")
+        names.add(name)
+        if not isinstance(entry.get("sha256"), str) or len(entry["sha256"]) != 64:
+            raise ReleaseError(f"third-party source archive {name} needs a SHA-256")
+    return declared
+
+
+def match_third_party_sources(
+    plan: dict[str, Any], supplied: list[Path]
+) -> list[tuple[dict[str, Any], Path]]:
+    """Pair every declared correspondence archive with exactly one supplied file.
+
+    A plan whose third-party objects were rebuilt from edited source declares
+    the archives holding those sources and build commands. They are part of the
+    corresponding source of the linked DLL, so a missing, extra or altered
+    archive fails closed.
+    """
+    declared = declared_third_party_sources(plan)
+    by_hash: dict[str, Path] = {}
+    for path in supplied:
+        _regular_file(path, "third-party source archive")
+        digest = sha256_file(path)
+        if digest in by_hash:
+            raise ReleaseError(f"third-party source archive supplied twice: {path}")
+        by_hash[digest] = path
+    pairs = []
+    for entry in declared:
+        path = by_hash.pop(entry["sha256"], None)
+        if path is None:
+            raise ReleaseError(
+                "missing third-party source archive declared by the plan: "
+                f"{entry['name']} ({entry['sha256']})"
+            )
+        pairs.append((entry, path))
+    if by_hash:
+        raise ReleaseError(
+            "third-party source archive is not declared by the plan: "
+            + ", ".join(str(path) for path in by_hash.values())
+        )
+    return pairs
+
+
+def _resource_inputs(plan: dict[str, Any]) -> list[dict[str, Any]]:
+    resources = plan.get("resources")
+    return list(resources["fonts"]) if resources is not None else []
+
+
+def verify_final_resources(plan: dict[str, Any], final: Path, generated_assets: Path) -> None:
+    """The archived final tree plus resource inputs must compile the pinned .res."""
+    resources = plan.get("resources")
+    if resources is None:
+        return
+    try:
+        _, record = REBUILD.RESOURCES.compile_resources(final, generated_assets, resources)
+    except REBUILD.RESOURCES.ResourceError as exc:
+        raise ReleaseError(f"final tree resources: {exc}") from exc
+    if record["resSHA256"] != resources["res"]["sha256"]:
+        raise ReleaseError("final tree does not reproduce the pinned DirectX11.res")
 
 
 def validate_inputs(
@@ -239,6 +337,19 @@ def validate_inputs(
         if in_source.is_file() and sha256_file(in_source) != asset["sha256"]:
             raise ReleaseError(f"generated asset in source tree mismatches the plan: {in_source}")
 
+    for font in _resource_inputs(plan):
+        relative = _relative_path(font["path"], "resource input")
+        candidate = _regular_file(generated_assets / relative, "resource input")
+        data = candidate.read_bytes()
+        if (
+            hashlib.sha256(data).hexdigest() != font["sha256"]
+            or len(data) != font["size"]
+            or REBUILD.RESOURCES.git_blob_sha1(data) != font["gitBlobSHA1"]
+        ):
+            raise ReleaseError(f"resource input does not match the plan: {candidate}")
+        if (source / relative).exists():
+            raise ReleaseError(f"resource input unexpectedly present in the clean tree: {relative}")
+
     objects = plan["stage1"].get("thirdPartyObjects", [])
     if third_party_objects is not None:
         scan_tree(third_party_objects, "third-party object tree")
@@ -248,6 +359,95 @@ def validate_inputs(
             if sha256_file(path) != entry["sha256"]:
                 raise ReleaseError(f"third-party object SHA-256 mismatch: {path}")
     return objects
+
+
+def load_zzz_pins(path: Path) -> dict[str, Any]:
+    _regular_file(path, "ZZMI source pins")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ReleaseError(f"ZZMI source pins are not valid UTF-8 JSON: {path}") from exc
+    if not isinstance(value, dict):
+        raise ReleaseError("ZZMI source pins must be a JSON object")
+    pin = value.get("sourcePins", {}).get("zzmiPackage")
+    package = value.get("package")
+    config = value.get("verifiedBinaries", {}).get("config")
+    if not isinstance(pin, dict) or not isinstance(package, dict) or not isinstance(config, dict):
+        raise ReleaseError("ZZMI source pins are missing package, config or source pin")
+    return value
+
+
+def validate_zzz_source(
+    pins: dict[str, Any], source: Path, archive: Path | None
+) -> dict[str, Any]:
+    pin = pins["sourcePins"]["zzmiPackage"]
+    scan_tree(
+        source,
+        "pinned ZZMI source",
+        allowed_directories={"ShaderFixes"},
+        reject_executables=True,
+    )
+    actual = REBUILD.tree_manifest(source)
+    expected_hash = pin.get("sourceTreeSHA256")
+    expected_count = pin.get("sourceTreeFileCount")
+    if not isinstance(expected_hash, str) or not isinstance(expected_count, int):
+        raise ReleaseError("ZZMI source pin is missing its exact tree hash or file count")
+    if actual["fileCount"] != expected_count:
+        raise ReleaseError(
+            "ZZMI source tree file count mismatch: "
+            f"got {actual['fileCount']}, expected {expected_count}"
+        )
+    if actual["sha256"] != expected_hash:
+        raise ReleaseError(
+            "ZZMI source tree SHA-256 does not match the pin: "
+            f"got {actual['sha256']}"
+        )
+    upstream = pins["package"].get("upstreamVersion")
+    if not isinstance(upstream, str):
+        raise ReleaseError("ZZMI source pins are missing package.upstreamVersion")
+    main = _regular_file(
+        source / "ZZMI" / "Core" / "ZZMI" / "main.ini", "ZZMI main.ini"
+    )
+    if f"ZZMI {upstream}" not in main.read_text(encoding="utf-8-sig", errors="replace"):
+        raise ReleaseError(f"ZZMI source does not declare version {upstream}")
+    for name, entry in pins["verifiedBinaries"]["config"].items():
+        if not isinstance(entry, dict):
+            raise ReleaseError(f"ZZMI config pin {name} must be an object")
+        relative = _relative_path(entry.get("path"), f"ZZMI config {name}")
+        path = _regular_file(source / "ZZMI" / relative, f"ZZMI config {name}")
+        if sha256_file(path) != entry.get("sha256"):
+            raise ReleaseError(f"ZZMI config SHA-256 does not match the pin: {relative}")
+        size = entry.get("size")
+        if size is not None and path.stat().st_size != size:
+            raise ReleaseError(f"ZZMI config size does not match the pin: {relative}")
+    license_path = _regular_file(source / "LICENSE", "ZZMI LICENSE")
+    license_sha = pin.get("licenseSHA256")
+    if not isinstance(license_sha, str) or sha256_file(license_path) != license_sha:
+        raise ReleaseError("ZZMI LICENSE SHA-256 does not match the source pin")
+    archive_sha = pin.get("sourceArchiveSHA256", pin.get("archiveSHA256"))
+    if not isinstance(archive_sha, str):
+        raise ReleaseError("ZZMI source pin is missing the source archive SHA-256")
+    if archive is not None:
+        _regular_file(archive, "ZZMI source archive")
+        if sha256_file(archive) != archive_sha:
+            raise ReleaseError("ZZMI source archive SHA-256 does not match the pin")
+    repository = str(pin.get("repository", "")).rstrip("/")
+    commit = str(pin.get("commit", ""))
+    source_name = f"{repository.rsplit('/', 1)[-1]}-{commit}"
+    if not SAFE_NAME.fullmatch(source_name):
+        raise ReleaseError("ZZMI source pin does not yield a safe archive directory name")
+    return {
+        "sourceName": source_name,
+        "repository": pin.get("repository"),
+        "tag": pin.get("tag"),
+        "commit": pin.get("commit"),
+        "archiveSHA256": archive_sha,
+        "sourceArchiveURL": pin.get("sourceArchiveURL"),
+        "treeSHA256": actual["sha256"],
+        "fileCount": actual["fileCount"],
+        "licenseSHA256": license_sha,
+        "releaseAsset": pin.get("releaseAsset"),
+    }
 
 
 @dataclass(frozen=True)
@@ -385,6 +585,7 @@ def _readme(
     final: dict[str, Any],
     stage3_present: bool,
     included_objects: int,
+    zzz_info: dict[str, Any] | None,
 ) -> bytes:
     pin = plan["sourcePin"]
     objects_line = (
@@ -393,7 +594,34 @@ def _readme(
         if included_objects
         else ""
     )
-    if included_objects:
+    correspondence = declared_third_party_sources(plan)
+    correspondence_line = (
+        "- `third-party-source/`: the source-correspondence archives for the "
+        "rebuilt third-party objects, as pinned by the build plan.\n"
+        if correspondence
+        else ""
+    )
+    if correspondence:
+        listed = "\n".join(
+            f"- `third-party-source/{entry['name']}` (SHA-256 `{entry['sha256']}`): "
+            f"{entry.get('description', '')}".rstrip()
+            for entry in correspondence
+        )
+        object_text = (
+            "The build links third-party objects (DirectXTK, PCRE2, NktHookLib "
+            "and its x64 assembly helper) that were rebuilt from source with "
+            "recorded syntax-only compatibility edits and translated assembly. "
+            "The build plan pins every object hash. The exact sources, edits, "
+            "build commands and provenance for those objects are included:\n\n"
+            + listed
+        )
+        if included_objects:
+            object_text += (
+                f"\n\nThe {included_objects} objects themselves are also included "
+                "under `third-party-objects/` and are hash-checked against "
+                "`compat/xxmi/build/payload-build-plan.json`."
+            )
+    elif included_objects:
         object_text = (
             f"The {included_objects} unmodified third-party objects used by the "
             "verified build are included under `third-party-objects/` and are "
@@ -435,6 +663,51 @@ def _readme(
   The intermediate base candidate tree (patches 0001-0006 plus the edits and
   generated input) hashes to `{stage1["sha256"]}`."""
         rebuild_candidates = "both candidates"
+    resources = plan.get("resources")
+    if resources is not None:
+        font_lines = "\n".join(
+            f"  - `generated/{font['path']}`: `{font['macro']}` (ID {font['id']}), "
+            f"{font['size']} bytes, SHA-256 `{font['sha256']}`, git blob `{font['gitBlobSHA1']}`"
+            for font in resources["fonts"]
+        )
+        authentication = resources.get("authentication", {})
+        resources_paragraph = f"""- The three DirectXTK SPRITEFONT files that `DirectX11/DirectX11.rc` embeds
+  for the Overlay. The clean-tree rule omits the `.spritefont` suffix, so they
+  are supplied beside the generated assets and are not part of any tree hash.
+  Each is byte-identical to the member of the pinned upstream source archive
+  `{authentication.get("sourceArchive", "")}` (SHA-256
+  `{authentication.get("sourceArchiveSHA256", "")}`):
+{font_lines}
+  `scripts/xxmi-payload-resources.py` compiles each stage tree's `.rc` with
+  these fonts into `DirectX11.res` (SHA-256 `{resources["res"]["sha256"]}`),
+  which every stage links; the rebuild verifies the linked DLL's resources.
+"""
+    else:
+        resources_paragraph = ""
+    if zzz_info is not None:
+        zzz_paragraph = f"""- `zzz/upstream/{zzz_info["sourceName"]}/`: the complete pinned ZZMI
+  {zzz_info["tag"]} source tree at commit `{zzz_info["commit"]}`, with
+  {zzz_info["fileCount"]} files and tree SHA-256 `{zzz_info["treeSHA256"]}`.
+  Its GPL-3.0-only `LICENSE` is included and hashes to
+  `{zzz_info["licenseSHA256"]}`. It contains no DLL, EXE or other executable
+  content.
+"""
+        zzz_summary = (
+            "It also contains the complete ZZMI configuration source needed for "
+            "the ZZZ candidate package."
+        )
+        zzz_not_included = ""
+    else:
+        zzz_paragraph = ""
+        zzz_summary = (
+            "No ZZMI source tree was supplied, so this archive does not claim to "
+            "be the complete corresponding source for a ZZZ package."
+        )
+        zzz_not_included = """- **ZZMI source.** No ZZMI configuration source tree is included in this
+  run. The pinned XXMI core source below covers the shared DLL only; it does
+  not by itself satisfy the corresponding-source obligation for a redistributed
+  ZZMI configuration package.
+"""
     return f"""# Corresponding source: MacGacha XXMI SRMI payload
 
 Release: `{version}`
@@ -445,7 +718,7 @@ License: GPL-3.0-only
 This archive is the corresponding source for the modified GPL-3.0-only SRMI
 `d3d11.dll` payload bundled in the MacGacha `{version}` release. It is a source
 archive only: it contains no rebuilt DLL, no prebuilt binary and no claim that a
-different toolchain reproduces the released DLL byte for byte.
+different toolchain reproduces the released DLL byte for byte. {zzz_summary}
 
 The MacGacha application source for this release is the Git tag `{tag}` in
 {APP_REPOSITORY}. Fetch that tag from the repository; the application source is
@@ -459,12 +732,12 @@ not duplicated here.
 {patched_paragraph}
 - `generated/DirectXTK/Inc/SimpleMath.inl`: the generated input omitted by the
   clean upstream archive.
-- `compat/xxmi/`: source pins, the build plan, the ordered patches, notices,
+{resources_paragraph}{zzz_paragraph}- `compat/xxmi/`: source pins, the build plan, the ordered patches, notices,
   licenses and the GPL-covered runner source.
 - `scripts/`: the source rebuild, package, runner and archive tools.
 - `SHA256SUMS`: per-file SHA-256 for every other file in this archive.
 - `SOURCE-RELEASE.json`: machine-readable pins and reconstructed tree hashes.
-{objects_line}
+{objects_line}{correspondence_line}
 ## Reconstruct and rebuild
 
 The patches in `compat/xxmi/patches/` apply with `patch -p1 --fuzz=0` in the
@@ -484,7 +757,7 @@ never download, install, run Wine or touch an installed game or prefix.
   binaries are not part of this source archive.
 - **User data.** No mods, shader fixes, caches, logs, profiles, game files or
   developer build directories are archived.
-
+{zzz_not_included}
 ## Third-party objects
 
 {object_text}
@@ -528,6 +801,7 @@ def _metadata(
     stage3_present: bool,
     objects: list[dict[str, Any]],
     included_objects: bool,
+    zzz_info: dict[str, Any] | None,
 ) -> bytes:
     value = {
         "schemaVersion": ARCHIVE_SCHEMA_VERSION,
@@ -563,20 +837,77 @@ def _metadata(
             },
         },
         "generatedAssets": plan["stage1"]["generatedAssets"],
+        "resources": (
+            {
+                "res": plan["resources"]["res"],
+                "inputs": [
+                    {
+                        "path": f"generated/{font['path']}",
+                        "macro": font["macro"],
+                        "id": font["id"],
+                        "size": font["size"],
+                        "sha256": font["sha256"],
+                        "gitBlobSHA1": font["gitBlobSHA1"],
+                    }
+                    for font in plan["resources"]["fonts"]
+                ],
+                "version": {
+                    key: plan["resources"]["version"][key]
+                    for key in ("language", "fileVersion", "sha256", "size")
+                },
+                "authentication": plan["resources"].get("authentication"),
+                "tool": "scripts/xxmi-payload-resources.py",
+            }
+            if plan.get("resources") is not None
+            else None
+        ),
         "thirdPartyObjects": {
             "included": included_objects,
             "count": len(objects),
             "entries": objects if included_objects else [],
         },
+        "thirdPartySource": [
+            {
+                "path": f"third-party-source/{entry['name']}",
+                "sha256": entry["sha256"],
+                "description": entry.get("description", ""),
+            }
+            for entry in declared_third_party_sources(plan)
+        ],
+        "zzzSource": (
+            {
+                "included": True,
+                "repository": zzz_info["repository"],
+                "tag": zzz_info["tag"],
+                "commit": zzz_info["commit"],
+                "archiveSHA256": zzz_info["archiveSHA256"],
+                "sourceArchiveURL": zzz_info["sourceArchiveURL"],
+                "treeSHA256": zzz_info["treeSHA256"],
+                "fileCount": zzz_info["fileCount"],
+                "license": "GPL-3.0-only",
+                "licenseSHA256": zzz_info["licenseSHA256"],
+                "releaseAsset": zzz_info.get("releaseAsset"),
+                "path": f"zzz/upstream/{zzz_info['sourceName']}",
+            }
+            if zzz_info is not None
+            else {"included": False}
+        ),
         "limitations": [
             "Source archive only; no DLL is rebuilt or included.",
             "System toolchains are not included and must be supplied by the builder.",
-            "Third-party objects are reused unmodified and hash-checked; they are "
-            "included only when explicitly supplied.",
+            "Third-party objects are reused as hash-checked build inputs and are "
+            "not rebuilt by these tools; the objects are included only when "
+            "explicitly supplied, and any source-correspondence archives the plan "
+            "pins are always included.",
             "No network, download, Wine, game, launcher or installed-state action "
             "is performed by the archive tool.",
         ],
     }
+    if zzz_info is None:
+        value["limitations"].append(
+            "No ZZMI configuration source tree was included; the shared core "
+            "source alone does not cover a redistributed ZZMI package."
+        )
     if stage3_present:
         value["stage3Patches"] = _archived_patches(plan["stage3"]["patches"])
         value["trees"]["stage2"] = {
@@ -596,6 +927,9 @@ def build_entries(
     third_party_objects: Path | None,
     objects: list[dict[str, Any]],
     reconstruction: Reconstruction,
+    zzz_source: Path | None,
+    zzz_info: dict[str, Any] | None,
+    third_party_sources: list[tuple[dict[str, Any], Path]] = (),
 ) -> list[Entry]:
     source_name = _archive_source_name(plan)
     tag = version if version.startswith("v") else f"v{version}"
@@ -606,6 +940,13 @@ def build_entries(
         relative = _relative_path(asset["path"], "generated asset")
         path = _regular_file(generated_assets / relative, "generated asset")
         entries.append(Entry(arcname=f"generated/{relative.as_posix()}", mode=0o644, source=path))
+    for font in _resource_inputs(plan):
+        relative = _relative_path(font["path"], "resource input")
+        path = _regular_file(generated_assets / relative, "resource input")
+        entries.append(Entry(arcname=f"generated/{relative.as_posix()}", mode=0o644, source=path))
+    if zzz_source is not None:
+        assert zzz_info is not None
+        entries.extend(_iter_tree(zzz_source, f"zzz/upstream/{zzz_info['sourceName']}"))
     if third_party_objects is not None:
         for entry in objects:
             relative = _relative_path(entry["path"], "third-party object")
@@ -617,6 +958,10 @@ def build_entries(
                     source=path,
                 )
             )
+    for declared, path in third_party_sources:
+        entries.append(
+            Entry(arcname=f"third-party-source/{declared['name']}", mode=0o644, source=path)
+        )
     entries.extend(_selected_files(COMPAT_FILES))
     entries.extend(_selected_files(SCRIPT_FILES))
     entries.extend(_patch_files())
@@ -632,6 +977,7 @@ def build_entries(
         final=reconstruction.final_manifest,
         stage3_present=reconstruction.stage3_present,
         included_objects=len(objects) if third_party_objects is not None else 0,
+        zzz_info=zzz_info,
     )
     metadata = _metadata(
         version=version,
@@ -644,6 +990,7 @@ def build_entries(
         stage3_present=reconstruction.stage3_present,
         objects=objects,
         included_objects=third_party_objects is not None,
+        zzz_info=zzz_info,
     )
     entries.append(Entry(arcname="README.md", mode=0o644, data=readme))
     entries.append(Entry(arcname="SOURCE-RELEASE.json", mode=0o644, data=metadata))
@@ -705,7 +1052,11 @@ def assemble(
     source: Path,
     generated_assets: Path,
     third_party_objects: Path | None,
+    zzz_source: Path | None,
+    zzz_pins_path: Path,
+    zzz_archive: Path | None,
     output_dir: Path,
+    third_party_sources: list[Path] = (),
 ) -> dict[str, Any]:
     output_dir = output_dir.resolve()
     if output_dir.exists() and not output_dir.is_dir():
@@ -720,6 +1071,12 @@ def assemble(
         generated_assets=generated_assets,
         third_party_objects=third_party_objects,
     )
+    source_pairs = match_third_party_sources(plan, list(third_party_sources))
+    zzz_info = None
+    if zzz_source is not None:
+        zzz_info = validate_zzz_source(
+            load_zzz_pins(zzz_pins_path), zzz_source, zzz_archive
+        )
     staging = Path(tempfile.mkdtemp(prefix=".xxmi-source-release-", dir=output_dir))
     try:
         reconstruction = reconstruct(
@@ -728,6 +1085,7 @@ def assemble(
             generated_assets=generated_assets,
             work=staging,
         )
+        verify_final_resources(plan, reconstruction.final, generated_assets)
         entries = build_entries(
             plan=plan,
             version=version,
@@ -736,6 +1094,9 @@ def assemble(
             third_party_objects=third_party_objects,
             objects=objects,
             reconstruction=reconstruction,
+            zzz_source=zzz_source,
+            zzz_info=zzz_info,
+            third_party_sources=source_pairs,
         )
         sums = Entry(
             arcname="SHA256SUMS",
@@ -760,6 +1121,9 @@ def assemble(
             (str(generated_assets), "generated-assets path"),
             (str(output_dir), "output path"),
             (str(third_party_objects) if third_party_objects else "", "third-party path"),
+            (str(zzz_source) if zzz_source else "", "ZZMI source path"),
+            (str(zzz_archive) if zzz_archive else "", "ZZMI archive path"),
+            *((str(path), "third-party source path") for _, path in source_pairs),
         ):
             if value and any(value in text for text in generated_text):
                 raise ReleaseError(f"generated archive metadata would leak a {label}")
@@ -780,6 +1144,9 @@ def assemble(
             "finalTreeSHA256": reconstruction.final_manifest["sha256"],
             "stage3Present": reconstruction.stage3_present,
             "thirdPartyObjectsIncluded": third_party_objects is not None,
+            "thirdPartySourceCount": len(source_pairs),
+            "zzzSourceIncluded": zzz_info is not None,
+            "zzzTreeSHA256": zzz_info["treeSHA256"] if zzz_info else None,
             "tag": tag,
         }
     finally:
@@ -794,6 +1161,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--version", required=True)
     parser.add_argument("--third-party-objects", type=Path)
+    parser.add_argument("--zzz-source", type=Path)
+    parser.add_argument("--zzz-pins", type=Path, default=DEFAULT_ZZZ_PINS)
+    parser.add_argument("--zzz-source-archive", type=Path)
+    parser.add_argument(
+        "--third-party-source",
+        type=Path,
+        action="append",
+        default=[],
+        help="a third-party source-correspondence archive pinned by the plan (repeatable)",
+    )
     args = parser.parse_args(argv)
     try:
         version = validate_version(args.version)
@@ -804,7 +1181,11 @@ def main(argv: list[str] | None = None) -> int:
             source=args.source,
             generated_assets=args.generated_assets,
             third_party_objects=args.third_party_objects,
+            zzz_source=args.zzz_source,
+            zzz_pins_path=args.zzz_pins,
+            zzz_archive=args.zzz_source_archive,
             output_dir=args.output_dir,
+            third_party_sources=args.third_party_source,
         )
     except ReleaseError as exc:
         print(f"xxmi-source-release: {exc}", file=sys.stderr)
@@ -824,6 +1205,12 @@ def main(argv: list[str] | None = None) -> int:
         "third-party objects: "
         + ("included" if result["thirdPartyObjectsIncluded"] else "not included")
     )
+    print(
+        "ZZMI source: "
+        + ("included" if result["zzzSourceIncluded"] else "not included")
+    )
+    if result["zzzTreeSHA256"]:
+        print(f"ZZMI tree: {result['zzzTreeSHA256']}")
     return 0
 
 
