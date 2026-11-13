@@ -227,6 +227,32 @@ struct AppModelGamesTests {
         try await gamesEventually { fake.statusCount == 6 }
     }
 
+    @Test func volumeMountRefreshesUnavailableLocationsWithinTheThrottle() async throws {
+        let center = NotificationCenter()
+        let (model, fake, _) = try gameFixture(volumeCenter: center)
+        let external = URL(fileURLWithPath: "/Volumes/Games SSD/MacGacha/ZenlessZoneZero", isDirectory: true)
+        fake.setInstallPath(external, for: "zzz")
+        fake.setStatus(.locationUnavailable(external), for: "zzz")
+        fake.setStatus(.installed(tag: "1.0"), for: "genshin")
+        await model.start()
+        #expect(model.games["zzz"] == GameState(status: .locationUnavailable(external)))
+        // The drive is connected inside the ten-minute refresh throttle.
+        fake.setStatus(.installed(tag: "1.0"), for: "zzz")
+        fake.setStatus(.updateAvailable(from: "1.0", to: "1.1"), for: "genshin")
+        try await gamesEventually {
+            center.post(name: NSWorkspace.didMountNotification, object: nil)
+            return model.games["zzz"] == GameState(status: .installed(tag: "1.0"))
+        }
+        // Internal-disk games are not re-read by a volume change.
+        #expect(model.games["genshin"] == GameState(status: .installed(tag: "1.0")))
+        // Unplugging reports the location as unavailable again.
+        fake.setStatus(.locationUnavailable(external), for: "zzz")
+        try await gamesEventually {
+            center.post(name: NSWorkspace.didUnmountNotification, object: nil)
+            return model.games["zzz"] == GameState(status: .locationUnavailable(external))
+        }
+    }
+
     @Test func progressKeepsPhaseThrottlesAndUsesFiveSecondSpeed() async throws {
         let (model, fake, clock) = try gameFixture(); defer { fake.finish() }
         model.installGame("genshin", voices: [], at: gameLocation, approved: true)
@@ -481,11 +507,12 @@ struct AppModelGamesTests {
 }
 
 private let gameLocation = URL(fileURLWithPath: "/inert/Games/Genshin")
-@MainActor private func gameFixture(fake: FakeGameServices = FakeGameServices(), purgeable: any PurgeableSpaceProbe = GamePurgeableProbe(bytes: nil)) throws -> (AppModel, FakeGameServices, GameTestClock) {
+@MainActor private func gameFixture(fake: FakeGameServices = FakeGameServices(), purgeable: any PurgeableSpaceProbe = GamePurgeableProbe(bytes: nil),
+    volumeCenter: NotificationCenter = NotificationCenter()) throws -> (AppModel, FakeGameServices, GameTestClock) {
     let clock = GameTestClock()
     let model = AppModel(paths: AppPaths(root: URL(fileURLWithPath: "/inert/AppSupport")),
         manifest: try RuntimeManifest(components: []), services: PreviewRuntimeServices(), defaults: nil,
-        gameServices: fake, purgeable: purgeable, now: { clock.time })
+        gameServices: fake, volumeCenter: volumeCenter, purgeable: purgeable, now: { clock.time })
     return (model, fake, clock)
 }
 @MainActor private func gamesEventually(_ condition: () -> Bool) async throws {
@@ -516,6 +543,7 @@ private final class FakeGameServices: GameServices, Sendable {
     }
     private struct State: Sendable {
         var statuses: [String: GameStatus] = [:]
+        var installPaths: [String: URL] = [:]
         var calls: [GameCall] = []
         var continuation: AsyncThrowingStream<OperationEvent, any Error>.Continuation?
         var active: String?
@@ -540,13 +568,14 @@ private final class FakeGameServices: GameServices, Sendable {
     func status(_ id: String) async -> GameStatus { state.withLock { $0.statusReads += 1; return $0.statuses[id] ?? .notInstalled } }
     func record(_ id: String) async throws -> GameRecord? {
         await snapshotRead?.wait()
-        let status = state.withLock { $0.statuses[id] ?? .notInstalled }
+        let (status, path) = state.withLock { ($0.statuses[id] ?? .notInstalled, $0.installPaths[id] ?? gameLocation) }
         if status == .notInstalled || status == .unknown { return nil }
         let build = InstalledBuild(tag: "1.0", buildID: "fixture", categories: [], voices: ["en-us"])
-        return GameRecord(installPath: gameLocation, ownership: .created, executable: try SafeRelativePath("Game.exe"), installed: build,
+        return GameRecord(installPath: path, ownership: .created, executable: try SafeRelativePath("Game.exe"), installed: build,
             installIdentity: FileSystemIdentity(volumeUUID: nil, device: 1, inode: 1))
     }
     func setStatus(_ status: GameStatus, for id: String) { state.withLock { $0.statuses[id] = status } }
+    func setInstallPath(_ path: URL, for id: String) { state.withLock { $0.installPaths[id] = path } }
     func estimate(_ id: String, voices: Set<String>, at location: URL) async throws -> GameEstimate {
         let error = state.withLock { $0.estimates.append(GameCall(action: "estimate", id: id, voices: voices)); return $0.estimateError }
         await estimateReads[voices]?.wait()

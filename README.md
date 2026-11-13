@@ -10,7 +10,7 @@ Code and documentation in this repository may be written or modified with assist
 
 ## XXMI mod support
 
-**Experimental ZZZ integration:** the app also includes an experimental Global Zenless Zone Zero profile with a separate bundled ZZMI 1.5.2 package, mods and saved settings. Select D3DMetal Wine 11.20 / GPTK 4.0b3 and turn **DirectX 12 off** before enabling injection. DX12 injection is rejected without changing launch settings. ZZZ injection and visible mod rendering have not yet been validated in a live game, so HSR is the only supported game.
+**Experimental ZZZ integration:** the app also includes an experimental Global Zenless Zone Zero profile with a separate bundled ZZMI 1.5.2 package, mods and saved settings. Select D3DMetal Wine 11.20 / GPTK 4.0b3 and turn **DirectX 12 off** before enabling injection. DX12 injection is rejected without changing launch settings. ZZZ with injection enabled currently crashes shortly after launch, because the game's anti-tamper module detects the injected XXMI module. Keep Mods off for ZZZ. HSR is the only supported game.
 
 Use SRMI mods in **Honkai: Star Rail Global** directly from MacGacha. Open the **wrench** in the sidebar to install XXMI and manage your mods.
 
@@ -40,7 +40,7 @@ Download the latest MacGacha DMG from [Releases](https://github.com/notsonata/Ma
 
 | Component | Version |
 |---|---|
-| MacGacha | 0.3.0, build 4 |
+| MacGacha | 0.3.0, build 5 |
 | XXMI Libraries | 1.2.3 |
 | SRMI | 2.4.3 |
 | HSR compatibility package | 2.4.3-macgacha.3 |

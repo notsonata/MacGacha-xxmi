@@ -207,6 +207,9 @@ final class AppModel {
     @ObservationIgnored var gameTask: Task<Void, Never>?
     @ObservationIgnored var gameStartupTask: Task<Void, Never>?
     @ObservationIgnored var gameActivationTask: Task<Void, Never>?
+    @ObservationIgnored var gameVolumeTask: Task<Void, Never>?
+    @ObservationIgnored var gameLocationRefreshInFlight = false
+    @ObservationIgnored var gameLocationRefreshPending = false
     var gameOperation: GameOperationToken?
     private(set) var languageRestart: UUID?
     func setLanguageRestart(_ value: UUID?) { languageRestart = value }
@@ -229,6 +232,7 @@ final class AppModel {
     private(set) var rosettaInstallInProgress = false
     @ObservationIgnored let rosettaProbe: any RosettaProbing
     @ObservationIgnored let activationCenter: NotificationCenter
+    @ObservationIgnored let volumeCenter: NotificationCenter
     @ObservationIgnored let rosettaClock: any Clock<Duration>
     @ObservationIgnored let rosettaPollInterval: Duration
     @ObservationIgnored let rosettaPollTimeout: Duration
@@ -316,6 +320,7 @@ final class AppModel {
         displayProbe: any DisplayProbe = FixedDisplayProbe(),
         displayNames: @escaping @MainActor @Sendable () -> [String: String] = { [:] },
         activationCenter: NotificationCenter = .default,
+        volumeCenter: NotificationCenter = NSWorkspace.shared.notificationCenter,
         rosettaClock: any Clock<Duration> = ContinuousClock(),
         rosettaPollInterval: Duration = .seconds(2), rosettaPollTimeout: Duration = .seconds(300),
         rosettaPrompt: @escaping @MainActor @Sendable () async throws -> Void = { try await RosettaPrompt.open() },
@@ -345,7 +350,7 @@ final class AppModel {
         self.displayProbe = displayProbe; self.displayNames = displayNames
         self.launchPreferences = launchPreferences ?? LiveLaunchPreferencesPersistence(paths: paths)
         self.rosettaProbe = rosettaProbe; self.rosettaClock = rosettaClock
-        self.activationCenter = activationCenter
+        self.activationCenter = activationCenter; self.volumeCenter = volumeCenter
         self.rosettaPollInterval = rosettaPollInterval; self.rosettaPollTimeout = rosettaPollTimeout; self.rosettaPrompt = rosettaPrompt
         self.recoverySleep = recoverySleep
         self.launchServices = launchServices; self.launchWindows = launchWindows; self.launchSleep = launchSleep
@@ -374,6 +379,7 @@ final class AppModel {
         rebuildRows()
         revalidateGameEvents()
         observeGameActivation()
+        observeVolumeChanges()
         observeEventsWindowActivation()
         refreshConnectedDisplays()
         screenChangeObservation = ScreenChangeObservation(center: activationCenter, model: self)
@@ -517,7 +523,7 @@ final class AppModel {
         artStartupTask?.cancel(); artRevealTask?.cancel()
         for task in eventsTasks.values { task.cancel() }
         eventsHydrationTask?.cancel(); eventsExpiryTask?.cancel(); eventsWindowTask?.cancel()
-        gameTask?.cancel(); gameStartupTask?.cancel(); gameActivationTask?.cancel()
+        gameTask?.cancel(); gameStartupTask?.cancel(); gameActivationTask?.cancel(); gameVolumeTask?.cancel()
         for task in modSupportTasks.values { task.cancel() }
     }
 

@@ -186,6 +186,63 @@ private struct GameSnapshot: Sendable {
         }
     }
 
+    /// Mounting, unmounting or renaming a volume can change whether a game's
+    /// install folder is reachable. The throttled status refresh would keep a
+    /// stale "Location Unavailable" until restart, so re-read only the games a
+    /// volume change can affect: those already unavailable and those on
+    /// another volume. Internal-disk games are never re-read here.
+    func observeVolumeChanges() {
+        let center = volumeCenter
+        let names = [NSWorkspace.didMountNotification, NSWorkspace.didUnmountNotification, NSWorkspace.didRenameVolumeNotification]
+        gameVolumeTask = Task { [weak self] in
+            await withDiscardingTaskGroup { group in
+                for name in names {
+                    group.addTask { [weak self] in
+                        let events = center.notifications(named: name).map { _ in true }
+                        for await _ in events {
+                            guard !Task.isCancelled else { return }
+                            await self?.refreshGameLocations()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    func refreshGameLocations() async {
+        // Before startup, the first status read already observes the volume.
+        guard gameStartupTask != nil else { return }
+        // Coalesce the burst of notifications one mount produces.
+        guard !gameLocationRefreshInFlight else { gameLocationRefreshPending = true; return }
+        gameLocationRefreshInFlight = true
+        defer { gameLocationRefreshInFlight = false }
+        repeat {
+            gameLocationRefreshPending = false
+            await ensureGameStartup().value
+            guard !Task.isCancelled, launchStartupError == nil else { return }
+            let revisions = gameRevisions, services = gameServices, region = region
+            let ids = GameDefinition.inRegion(region).map(\.id).filter { id in
+                guard id != gameOperation?.id, gameUpdateCheckTasks[id] == nil else { return false }
+                if case .locationUnavailable = games[id]?.status { return true }
+                return gameRecords[id]?.installPath.standardizedFileURL.path(percentEncoded: false).hasPrefix("/Volumes/") == true
+            }
+            guard !ids.isEmpty else { continue }
+            let results = await withTaskGroup(of: (String, GameSnapshot).self) { group in
+                for id in ids { group.addTask { (id, await readGame(services, id: id)) } }
+                var result: [(String, GameSnapshot)] = []
+                for await value in group { result.append(value) }
+                return result
+            }
+            guard !Task.isCancelled else { return }
+            var changed = false
+            for (id, snapshot) in results where gameRevisions[id] == revisions[id] && gameUpdateCheckTasks[id] == nil && id != gameOperation?.id {
+                if games[id]?.status != snapshot.status { changed = true }
+                applyGame(snapshot, id: id, activity: games[id]?.activity, reportError: false)
+            }
+            if changed { await refreshPreDownloads(in: region) }
+        } while gameLocationRefreshPending
+    }
+
     func ensureGameStartup() -> Task<Void, Never> {
         if let task = gameStartupTask { return task }
         let services = gameServices
