@@ -35,6 +35,7 @@ struct GameFooter: View {
     @State private var confirmingParts = false
     @State private var confirmingUninstall = false
     @State private var confirmingModsRisk = false
+    @State private var confirmingPreDownloadDeletion = false
     @State private var progressHovered = false
 
     private var state: GameState { model.games[game.id] ?? GameState(status: .unknown) }
@@ -58,6 +59,9 @@ struct GameFooter: View {
                 if let note = otherRegionNote {
                     OtherRegionNote(text: note.text) { model.region = note.region }
                 }
+                if showsPreDownload {
+                    PreDownloadBar(game: game, gameIsLive: launch.map { if case .failed = $0 { false } else { true } } ?? false)
+                }
                 HStack(spacing: 8) {
                     // Hovering the progress capsule swaps the hint for the numbers, as HoYoPlay does.
                     Text(action == .progress && progressHovered ? state.progressDetail ?? statusLine : statusLine)
@@ -79,7 +83,7 @@ struct GameFooter: View {
                 }
                 if AppModel.supportsModSupport(gameID: game.id) {
                     modsToggle
-                    if let error = model.modSupportError {
+                    if let error = model.modSupportError(for: game.id) {
                         Label(error, systemImage: "exclamationmark.triangle.fill")
                             .font(.caption)
                             .foregroundStyle(.white)
@@ -92,7 +96,8 @@ struct GameFooter: View {
                         backgroundToggle
                     }
                     if showsMenu {
-                        GameMenu(game: game, state: state, gameSheet: $gameSheet, confirmingUninstall: $confirmingUninstall)
+                        GameMenu(game: game, state: state, gameSheet: $gameSheet, confirmingUninstall: $confirmingUninstall,
+                            confirmingPreDownloadDeletion: $confirmingPreDownloadDeletion)
                     }
                     PrimaryActionButton(game: game, action: action, state: state, panel: $panel,
                         gameSheet: $gameSheet, confirmingParts: $confirmingParts, confirmingUninstall: $confirmingUninstall,
@@ -106,11 +111,11 @@ struct GameFooter: View {
         .animation(.smooth(duration: 0.25), value: action)
         .task(id: game.id) {
             guard AppModel.supportsModSupport(gameID: game.id) else { return }
-            await model.refreshModSupport()
+            await model.refreshModSupport(gameID: game.id)
         }
         .confirmationDialog("Enable mod injection?", isPresented: $confirmingModsRisk) {
             Button("Enable Mods", role: .destructive) {
-                model.setModSupportInjection(true, acknowledgingRisk: true)
+                model.setModSupportInjection(true, acknowledgingRisk: true, gameID: game.id)
             }
             Button("Cancel", role: .cancel) {}
         } message: {
@@ -124,6 +129,13 @@ struct GameFooter: View {
             }
         } message: {
             Text(partsMessage)
+        }
+        .confirmationDialog("Delete the pre-download?", isPresented: $confirmingPreDownloadDeletion) {
+            Button("Delete Pre-download", role: .destructive) {
+                Task { await model.deletePreDownload(game.id) }
+            }
+        } message: {
+            Text("The update will download these files again when it's released.")
         }
         .confirmationDialog("Uninstall \(game.name)?", isPresented: $confirmingUninstall) {
             Button("Uninstall", role: .destructive) {
@@ -140,7 +152,7 @@ struct GameFooter: View {
             Toggle("Mods", isOn: modsBinding)
                 .toggleStyle(.switch)
                 .tint(game.tint)
-            if model.isModSupportBusy {
+            if model.isModSupportBusy(for: game.id) {
                 ProgressView().controlSize(.small)
             }
         }
@@ -150,13 +162,14 @@ struct GameFooter: View {
         .frame(height: 40)
         .glassEffect(.regular, in: .capsule)
         .disabled(modsToggleDisabled)
+        .opacity(modsToggleDisabled ? 0.45 : 1)
         .help(modsToggleHelp)
         .accessibilityLabel(Text("Mods"))
     }
 
     private var modsToggleHelp: Text {
-        if model.modSupportSnapshot?.isInstalled != true,
-            model.modSupportSnapshot?.injectionEnabled != true {
+        if model.modSupportSnapshot(for: game.id)?.isInstalled != true,
+            model.modSupportSnapshot(for: game.id)?.injectionEnabled != true {
             return Text("Install XXMI in the XXMI panel to enable mods.")
         }
         return Text("Mod injection applies to the next launch, not a running game")
@@ -164,21 +177,22 @@ struct GameFooter: View {
 
     private var modsBinding: Binding<Bool> {
         Binding(
-            get: { model.modSupportSnapshot?.injectionEnabled ?? false },
+            get: { model.modSupportSnapshot(for: game.id)?.injectionEnabled ?? false },
             set: { enabled in
-                guard !model.isModSupportBusy else { return }
-                if enabled, model.modSupportNeedsRiskAcknowledgment {
+                guard !model.isModSupportBusy(for: game.id) else { return }
+                if enabled, model.modSupportNeedsRiskAcknowledgment(for: game.id) {
                     confirmingModsRisk = true
                 } else {
-                    model.setModSupportInjection(enabled, acknowledgingRisk: false)
+                    model.setModSupportInjection(enabled, acknowledgingRisk: false, gameID: game.id)
                 }
             }
         )
     }
 
     private var modsToggleDisabled: Bool {
-        model.isModSupportBusy
-            || (model.modSupportSnapshot?.isInstalled != true && model.modSupportSnapshot?.injectionEnabled != true)
+        model.isModSupportBusy(for: game.id)
+            || (model.modSupportSnapshot(for: game.id)?.isInstalled != true
+                && model.modSupportSnapshot(for: game.id)?.injectionEnabled != true)
     }
 
     /// Switches between the animated background and the static image.
@@ -214,6 +228,16 @@ struct GameFooter: View {
         }
     }
 
+    /// The pre-download sits beside an installed game, never over another operation's progress.
+    private var showsPreDownload: Bool {
+        if case .working = state.activity { return false }
+        if case .resolving = state.activity { return false }
+        return switch state.status {
+        case .installed, .updateAvailable, .paused: true
+        default: false
+        }
+    }
+
     private var showsMenu: Bool {
         switch state.activity {
         // Nothing in the menu can run while an operation is in flight.
@@ -244,8 +268,23 @@ struct GameFooter: View {
         case .failed(let message): return String(localized: "Setup didn't finish: \(message)", comment: "Runtime setup failure; the argument is the reason")
         case nil: break
         }
+        // Play gave way to Set Up for a game that worked yesterday, so the line says why.
+        if case .setUpRuntimes = action, model.runtimeSetupIsUpdate(for: game.id) {
+            return String(localized: "A dependency update needs you to accept Apple's license terms")
+        }
         // A disabled button shows no tooltip on macOS, so the reason it waits goes here.
         if let busy = busyElsewhere { return busy }
+        // The result of a manual check stays until the status changes for another reason.
+        switch model.gameUpdateCheck[game.id] {
+        case .checking: return String(localized: "Checking for updates…")
+        case .upToDate:
+            if case .installed(let tag) = state.status {
+                return String(localized: "Version \(tag) · Up to date", comment: "Game status after a manual update check; the argument is the game version")
+            }
+        case .failed(let error):
+            return String(localized: "Couldn't check for updates: \(error.userMessage)", comment: "Manual game update check failed; the argument is the reason")
+        case .updateAvailable, nil: break
+        }
         switch state.status {
         case .unknown: return String(localized: "Checking for updates…")
         case .notInstalled: return String(localized: "Not installed")
@@ -263,7 +302,11 @@ struct GameFooter: View {
     private var note: String? {
         switch model.launchNotes[game.id] {
         case .starRailSettingsMissing:
-            String(localized: "Open the game's graphics settings once, then play again to use 120 FPS")
+            String(localized: "Change any option in the game's graphics settings once, then play again to use 120 FPS")
+        case .surroundUnavailable:
+            String(localized: "Surround sound wasn't available for this launch, so the game used stereo")
+        case .fpsUnlockUnavailable:
+            String(localized: "The frame-rate unlock didn't apply this time, so the game ran at its normal frame rate")
         case nil: nil
         }
     }
@@ -590,8 +633,9 @@ struct PrimaryActionButton: View {
     }
 
     private func progressLabel(at now: ContinuousClock.Instant) -> String {
-        guard case .working(let phase, let fraction, _, _, _) = state.activity else { return "" }
-        let label = RuntimeRowView.label(for: phase, fraction: fraction)
+        guard case .working(let phase, let fraction, _, let downloaded, _) = state.activity else { return "" }
+        let localWork = (phase == .staging && downloaded == nil) || (phase == .checkingSpace && fraction != nil)
+        let label = localWork ? String(localized: "Installing…") : RuntimePhaseText.label(for: phase, fraction: fraction)
         switch state.timing?.display(at: now) ?? .none {
         case .none:
             return label
@@ -622,6 +666,7 @@ struct GameMenu: View {
     let state: GameState
     @Binding var gameSheet: GameSheet?
     @Binding var confirmingUninstall: Bool
+    @Binding var confirmingPreDownloadDeletion: Bool
 
     /// While waiting for approval only folder actions make sense; verify and voices would start new work.
     private var waitingForApproval: Bool {
@@ -638,6 +683,8 @@ struct GameMenu: View {
                 Button("Game Settings…", systemImage: "slider.horizontal.3") { gameSheet = .settings(game.id) }
             }
             if isInstalled, !waitingForApproval, !model.isGameOperationRunning, !isLive {
+                Button("Check for Updates", systemImage: "arrow.triangle.2.circlepath") { model.checkForGameUpdate(game.id) }
+                    .disabled(model.gameUpdateCheck[game.id] == .checking)
                 Button("Verify Files", systemImage: "checkmark.shield") { model.verifyGame(game.id) }
                 Button("Voice Packs…", systemImage: "waveform") { gameSheet = .voices(game.id) }
             }
@@ -647,6 +694,10 @@ struct GameMenu: View {
                 }
             }
             Divider()
+            if model.preDownloadState(for: game.id).canDelete {
+                Button("Delete Pre-download…", systemImage: "xmark.bin") { confirmingPreDownloadDeletion = true }
+                .disabled(model.isGameOperationRunning || isLive)
+            }
             Button("Uninstall…", systemImage: "trash", role: .destructive) { confirmingUninstall = true }
                 .disabled(model.isGameOperationRunning || isLive)
         } label: {

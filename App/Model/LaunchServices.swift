@@ -23,37 +23,51 @@ protocol LaunchServices: Sendable {
     func markReady(_ id: String) async
     func notices() async throws -> [RecoveryNotice]
     func acknowledge(_ id: UUID) async throws
+    /// Explicit live mod update for the running, journaled injection session.
+    func applyModsToRunningGame(_ id: String) async throws
 }
 
 extension LaunchServices {
     func startupReattachment() async throws -> LaunchStartupResult { LaunchStartupResult(sessions: try await reattach()) }
+    func applyModsToRunningGame(_ id: String) async throws { throw LauncherError.io("Live mod updates are unavailable") }
 }
 
 /// The same lazy manager backs launch, startup recovery and GameLibrary's guard.
 /// Construction performs no I/O; callers join startup before any game operation.
 actor LiveLaunchServices: LaunchServices, GameOperationGuard {
     private let paths: AppPaths
+    private let catalog: (any RuntimeCatalogAccess)?
+    private let icons: any GameModeIconProviding
     private let log: EventLog?
-    private let modSupportStore: ModSupportStore
+    private let modSupportStores: [String: ModSupportStore]
     private var construction: Task<LaunchManager, any Error>?
     private var startup: Task<LaunchStartupResult, Never>?
-    init(paths: AppPaths, log: EventLog? = nil, modSupportStore: ModSupportStore? = nil) {
-        self.paths = paths; self.log = log
-        self.modSupportStore = modSupportStore ?? ModSupportStore(paths: paths)
+    init(paths: AppPaths, log: EventLog? = nil, modSupportStore: ModSupportStore? = nil,
+        modSupportStores: [String: ModSupportStore]? = nil,
+        icons: any GameModeIconProviding = BundleGameModeIcons(), catalog: (any RuntimeCatalogAccess)? = nil) {
+        self.paths = paths; self.log = log; self.icons = icons; self.catalog = catalog
+        self.modSupportStores = modSupportStores ?? [
+            ModSupportProfile.starRail.gameID: modSupportStore ?? ModSupportStore(paths: paths, profile: .starRail),
+            ModSupportProfile.zzz.gameID: ModSupportStore(paths: paths, profile: .zzz),
+        ]
     }
     private func manager() async throws -> LaunchManager {
         if let construction { return try await construction.value }
-        let paths = paths, log = log, modSupportStore = modSupportStore
+        let paths = paths, log = log, modSupportStores = modSupportStores, icons = icons, catalog = catalog
         let task = Task {
             let manifest = try await BundledRuntimeManifest.load()
             let runner = SystemProcessRunner(), store = RuntimeStore(paths: paths)
             let consent = ConsentStore(url: paths.root.appendingPathComponent("consent.json"), root: paths.root)
             let bundles = RuntimeBundleManager(manifest: manifest, store: store, consent: consent,
                 installer: ComponentInstaller(store: store, consent: consent))
-            return LaunchManager(paths: paths, runtimes: LiveLaunchRuntimes(manifest: manifest, manager: bundles, store: store),
+            let runtimes: LiveLaunchRuntimes
+            if let catalog { runtimes = LiveLaunchRuntimes(paths: paths, manager: bundles, store: store, snapshot: { try await catalog.snapshot() }) }
+            else { runtimes = LiveLaunchRuntimes(manifest: manifest, manager: bundles, store: store) }
+            return LaunchManager(paths: paths, runtimes: runtimes,
                 prefixes: PrefixManager(paths: paths, runner: runner), preparation: LaunchPreparation(paths: paths, runner: runner),
                 spawner: SystemProcessSpawner(), inspector: SystemProcessInspector(), runner: runner, clock: ContinuousClock(), log: log,
-                injectionPreparation: ModSupportLaunchAdapter(store: modSupportStore))
+                gameMode: GameModeHelper(paths: paths, icons: icons),
+                injectionPreparation: ModSupportLaunchAdapter(stores: modSupportStores))
         }
         construction = task
         return try await task.value
@@ -108,6 +122,7 @@ actor LiveLaunchServices: LaunchServices, GameOperationGuard {
     func markReady(_ id: String) async { try? await manager().markReady(game: id) }
     func notices() async throws -> [RecoveryNotice] { try await manager().pendingRecoveryNotices() }
     func acknowledge(_ id: UUID) async throws { try await manager().acknowledgeRecoveryNotice(id: id) }
+    func applyModsToRunningGame(_ id: String) async throws { try await manager().applyLiveInjectionUpdate(game: id) }
 }
 
 struct PreviewLaunchServices: LaunchServices {

@@ -26,9 +26,11 @@ public actor LaunchManager {
     private let prefixes: any LaunchPrefixProviding
     private let preparation: any LaunchPreparing
     private let spawner: any ProcessSpawner
+    private let fpsInjectorStatus: @Sendable (ProcessIdentity) throws -> SessionChildStatus
     private let inspector: any ProcessInspector
     private let runner: any ProcessRunner
     private let clock: any Clock<Duration>
+    private let gameMode: (any GameModeProviding)?
     private let displayProbe: any DisplayProbe
     private let proxyFactory: ProxyFactory
     private let injectionPreparation: (any LaunchInjectionPreparing)?
@@ -44,6 +46,9 @@ public actor LaunchManager {
     private var recovering = false
     private var guardRecoveries: Set<String> = []
     private var supervision: [String: Task<Void, Never>] = [:]
+    // A user-requested live mod update. Verified end waits for it, so harvest
+    // and reclamation never race a publication into the same snapshot.
+    private var liveApplies: [String: Task<Void, any Error>] = [:]
 
     private final class Context {
         var session: LaunchSession
@@ -58,10 +63,17 @@ public actor LaunchManager {
         // Reattached UI observers must stop their window timers at verified end.
         var hasEnded = false
         var ready = false
+        var runningTimer: (@Sendable () -> Duration)?
+        var lastConfirmedElapsed: Duration = .zero
+        var qualificationTask: Task<Void, Never>?
         var runningAnnounced = false
         var endOutcome = "while MacGacha was closed"
         var restoreEntryCount = 0
         var ownedWrapper: ProcessIdentity?
+        var fpsInjector: ResolvedFpsInjector?
+        var fpsAttempted = false
+        var fpsChild: OwnedSessionChild?
+        var fpsWorker: Task<Void, Never>?
         var unverifiedBuild = false
         var deferredFailure: LaunchFailure?
         // Keep the verified restore across unlink/fsync failure. The journal can
@@ -73,18 +85,21 @@ public actor LaunchManager {
             self.session = session; self.lock = lock; self.pin = pin; self.log = log
             self.lifecycleLog = log.map(SessionLifecycleLog.init)
             self.watchPhase = session.state == .running ? .running : .spawning
+            self.ready = session.reachedReady == true
         }
     }
 
     public init(paths: AppPaths, runtimes: any LaunchRuntimeProviding, prefixes: any LaunchPrefixProviding,
         preparation: any LaunchPreparing, spawner: any ProcessSpawner, inspector: any ProcessInspector,
         runner: any ProcessRunner, clock: any Clock<Duration>, log: EventLog? = nil,
-        displayProbe: any DisplayProbe = SystemDisplayProbe(),
+        displayProbe: any DisplayProbe = SystemDisplayProbe(), gameMode: (any GameModeProviding)? = nil,
         injectionPreparation: (any LaunchInjectionPreparing)? = nil) {
+        self.gameMode = gameMode ?? GameModeHelper(paths: paths)
         self.eventLog = log ?? EventLog(directory: paths.logs)
         self.sessionLogWriter = Self.makeSessionLogWriter(beforeWrite: {})
         self.paths = paths; self.runtimes = runtimes; self.prefixes = prefixes; self.preparation = preparation
         self.spawner = spawner; self.inspector = inspector; self.runner = runner; self.clock = clock; self.displayProbe = displayProbe
+        self.fpsInjectorStatus = OwnedSessionChild.systemStatus
         self.baseEnvironment = ProcessInfo.processInfo.environment; self.journalFileOps = SystemFileOps()
         self.recipeOverrides = [:]
         self.hideHooks = .none; self.beforeJournalRead = {}; self.beforeRecoveryRead = {}
@@ -95,7 +110,7 @@ public actor LaunchManager {
 
     package init(paths: AppPaths, runtimes: any LaunchRuntimeProviding, prefixes: any LaunchPrefixProviding,
         preparation: any LaunchPreparing, spawner: any ProcessSpawner, inspector: any ProcessInspector,
-        runner: any ProcessRunner, clock: any Clock<Duration>, log: EventLog? = nil, displayProbe: any DisplayProbe = FixedDisplayProbe(),
+        runner: any ProcessRunner, clock: any Clock<Duration>, log: EventLog? = nil, displayProbe: any DisplayProbe = FixedDisplayProbe(), gameMode: (any GameModeProviding)? = nil,
         proxyFactory: @escaping ProxyFactory,
         baseEnvironment: [String: String] = [:], journalFileOps: any FileOps = SystemFileOps(),
         hideHooks: LaunchFileHooks = .none, beforeJournalRead: @escaping @Sendable () throws -> Void = {},
@@ -103,11 +118,14 @@ public actor LaunchManager {
         recipeOverrides: [String: LaunchRecipe] = [:],
         sessionProvenance: @escaping @Sendable () throws -> (bootSessionUUID: String, sessionStartTime: UInt64) = LaunchManager.currentSessionProvenance,
         beforeSessionLogWrite: @escaping @Sendable () throws -> Void = {},
+        fpsInjectorStatus: @escaping @Sendable (ProcessIdentity) throws -> SessionChildStatus = OwnedSessionChild.systemStatus,
         injectionPreparation: (any LaunchInjectionPreparing)? = nil) {
+        self.gameMode = gameMode
         self.eventLog = log ?? EventLog(directory: paths.logs)
         self.sessionLogWriter = Self.makeSessionLogWriter(beforeWrite: beforeSessionLogWrite)
         self.paths = paths; self.runtimes = runtimes; self.prefixes = prefixes; self.preparation = preparation
         self.spawner = spawner; self.inspector = inspector; self.runner = runner; self.clock = clock; self.displayProbe = displayProbe
+        self.fpsInjectorStatus = fpsInjectorStatus
         self.proxyFactory = proxyFactory; self.baseEnvironment = baseEnvironment; self.journalFileOps = journalFileOps
         self.recipeOverrides = recipeOverrides
         self.hideHooks = hideHooks; self.beforeJournalRead = beforeJournalRead; self.beforeRecoveryRead = beforeRecoveryRead
@@ -161,6 +179,7 @@ public actor LaunchManager {
     }
 
     package func waitForSupervision(game: String) async { await supervision[game]?.value }
+    package func waitForFpsInjector(game: String) async { await contexts[game]?.fpsWorker?.value }
 
     public func liveSession(for game: String) -> LaunchSession? { contexts[game]?.session }
 
@@ -190,6 +209,7 @@ public actor LaunchManager {
     public func markReady(game: String) {
         guard let context = contexts[game], context.session.state == .running, !context.hasEnded, !context.ready else { return }
         context.ready = true
+        context.session.reachedReady = true
         context.continuation?.yield(.ready)
         note(context, "game window ready")
     }
@@ -202,11 +222,19 @@ public actor LaunchManager {
             events.yield(.stage(stage))
             guard let recipe = (recipeOverrides[game.id] ?? Recipes.recipe(for: game.id)) else { throw LauncherError.io("Unknown launch game") }
             let paths = paths, journalFileOps = journalFileOps
-            let (settings, logsEnabled) = try await BlockingIO.run {
-                let settings = try LaunchSettingsStore(paths: paths).load(game.id)
-                let enabled = try GlobalLaunchSettingsStore(paths: paths).load().sessionLogsEnabled
-                return (settings, enabled)
+            let (settings, globalSettings, riskRefused) = try await BlockingIO.run {
+                var settings = try LaunchSettingsStore(paths: paths).load(game.id)
+                let global = try GlobalLaunchSettingsStore(paths: paths).load()
+                let refused = GenshinFps.applies(to: game.id) && settings.unlockFPS && !global.genshinFpsRiskAcknowledged
+                // Hand-edited or imported settings cannot bypass the one-time warning.
+                if refused { settings.unlockFPS = false }
+                return (settings, global, refused)
             }
+            if riskRefused {
+                events.yield(.note(.fpsUnlockUnavailable))
+                event("FPS unlock unavailable", game: game.id, metadata: ["reason": "riskNotAcknowledged"])
+            }
+            let logsEnabled = globalSettings.sessionLogsEnabled
             event("Launch started", game: game.id, metadata: ["backend": settings.backend.rawValue,
                 "buildVerification": unverified ? "unverified" : "verified"])
             let identity = try await BlockingIO.run {
@@ -214,17 +242,35 @@ public actor LaunchManager {
                 guard try fs.itemType(at: recipe.executable) == .regularFile else { throw LauncherError.io("Game executable is missing") }
                 return try fs.rootIdentity()
             }
+            try await injectionPreparation?.validateEligibility(game: game, settings: settings)
             let selection = try await runtimes.selection(for: settings)
             let bundle = selection.bundle
             let prefix = try await prefixes.prefixURL(game: game.id, bundle: bundle)
-            let preview = try LaunchResolver.resolve(recipe: recipe, settings: settings, installRoot: installRoot, prefix: prefix,
-                wineBinary: bundle.wineBinary, proxyPort: 0, componentRoots: selection.componentRoots, baseEnvironment: baseEnvironment, runtimeBundleID: bundle.id.rawValue, displays: displayProbe.connectedDisplays().map(\.id))
+            let requiredComponents = LaunchResolver.requiredComponents(recipe: recipe, settings: settings, runtimeBundleID: selection.runtimeProfileID)
             guard !selection.componentIDs.isEmpty else { throw LauncherError.io("The runtime bundle has no pinnable components") }
-            let compatibilityIDs = try preview.requiredComponents.map { kind in
+            let compatibilityIDs = try requiredComponents.map { kind in
                 guard let id = selection.compatibilityComponentIDs[kind] else { throw LauncherError.io("Required compatibility component has no pin identity") }
                 return id
             }
             let ids = Array(Set(selection.componentIDs + compatibilityIDs)).sorted()
+            let surroundRequested = requiredComponents.contains(.surroundAudio)
+            let surroundModule = surroundRequested ? selection.componentRoots[.surroundAudio].map { SurroundAudio.modulePath.resolved(against: $0) } : nil
+            guard !surroundRequested || surroundModule != nil else { throw LauncherError.io("Missing surround component root") }
+            var helper: GameModeRuntime?
+            if globalSettings.gameModeEnabled || surroundRequested, let gameMode {
+                do { helper = try await gameMode.prepare(bundle: bundle, game: game, componentIDs: ids,
+                    options: GameModeOptions(gameModeEnabled: globalSettings.gameModeEnabled, surroundModule: surroundModule, runtimeProfileID: selection.runtimeProfileID)) }
+                catch {
+                    event("Game Mode unavailable; using normal Wine", game: game.id, metadata: ["reason": "helperPreparationFailed"])
+                }
+            } else {
+                event("Game Mode skipped; using normal Wine", game: game.id,
+                    metadata: ["reason": globalSettings.gameModeEnabled ? "helperUnavailable" : "disabled"])
+            }
+            var previewChoice = try LaunchResolver.resolve(recipe: recipe, settings: settings, installRoot: installRoot, prefix: prefix,
+                wineBinary: bundle.wineBinary, proxyPort: 0, componentRoots: selection.componentRoots, baseEnvironment: baseEnvironment,
+                runtimeBundleID: selection.runtimeProfileID, displays: displayProbe.connectedDisplays().map(\.id), gameModeRuntime: helper, gameModeEnabled: globalSettings.gameModeEnabled,
+                genshinFpsRiskAcknowledged: globalSettings.genshinFpsRiskAcknowledged)
             stage = .lock; events.yield(.stage(stage))
             let (lock, pin) = try await BlockingIO.run {
                 let lock = try SessionLock.acquire(paths: paths, game: game.id)
@@ -232,18 +278,37 @@ public actor LaunchManager {
                 return (lock, pin)
             }
             let validated = try await runtimes.selection(for: settings)
-            guard validated.bundle == bundle,
+            guard validated.bundle == bundle, validated.runtimeProfileID == selection.runtimeProfileID,
                 Set(validated.componentIDs) == Set(selection.componentIDs),
-                preview.requiredComponents.allSatisfy({ validated.componentRoots[$0] == selection.componentRoots[$0]
+                requiredComponents.allSatisfy({ validated.componentRoots[$0] == selection.componentRoots[$0]
                     && validated.compatibilityComponentIDs[$0] == selection.compatibilityComponentIDs[$0] }) else {
                 throw LauncherError.io("The selected runtime changed before it could be pinned")
             }
+            if let candidate = helper, let gameMode {
+                do {
+                    try await gameMode.validate(candidate, bundle: bundle)
+                    event(globalSettings.gameModeEnabled ? "Game Mode helper selected" : "Surround audio helper selected", game: game.id)
+                } catch {
+                    helper = nil
+                    previewChoice = try LaunchResolver.resolve(recipe: recipe, settings: settings, installRoot: installRoot, prefix: prefix,
+                        wineBinary: bundle.wineBinary, proxyPort: 0, componentRoots: selection.componentRoots, baseEnvironment: baseEnvironment,
+                        runtimeBundleID: selection.runtimeProfileID, genshinFpsRiskAcknowledged: globalSettings.genshinFpsRiskAcknowledged)
+                    event("Game Mode unavailable; using normal Wine", game: game.id, metadata: ["reason": "helperValidationFailed"])
+                }
+            }
+            let surroundActive = surroundRequested && helper?.surroundModule == surroundModule && helper?.gameID == game.id
+            if surroundRequested && !surroundActive {
+                events.yield(.note(.surroundUnavailable))
+                event("Surround audio skipped; using normal Wine audio", game: game.id, metadata: ["reason": "helperUnavailable"])
+            }
+            if !globalSettings.gameModeEnabled && !surroundActive { helper = nil }
+            let preview = previewChoice
             guard try await read(game: game.id) == nil else { throw LauncherError.busy("Launch recovery is required") }
             let provenance = sessionProvenance
             let (bootSessionUUID, sessionStartTime) = try await BlockingIO.run { try provenance() }
             let session = LaunchSession(sessionID: UUID(), game: game.id, installRoot: installRoot, installIdentity: identity,
-                prefix: prefix, bundleID: bundle.id.rawValue, runtimeDigest: bundle.digest, wineBinary: bundle.wineBinary,
-                wineserver: bundle.wineBinary.deletingLastPathComponent().appendingPathComponent("wineserver"), componentIDs: ids,
+                prefix: prefix, bundleID: bundle.id.rawValue, runtimeDigest: bundle.digest, wineBinary: helper?.wineBinary ?? bundle.wineBinary,
+                wineserver: helper?.wineserver ?? bundle.wineBinary.deletingLastPathComponent().appendingPathComponent("wineserver"), componentIDs: ids,
                 recipeVersion: recipe.recipeVersion, settings: settings, gameExecutable: recipe.executable,
                 bootSessionUUID: bootSessionUUID, sessionStartTime: sessionStartTime)
             let context = Context(session: session, lock: lock, pin: pin)
@@ -306,7 +371,9 @@ public actor LaunchManager {
             context.session.proxyPort = context.proxy?.port
             let displays = displayProbe.connectedDisplays().map(\.id)
             let resolved = try LaunchResolver.resolve(recipe: recipe, settings: settings, installRoot: installRoot, prefix: prefix,
-                wineBinary: bundle.wineBinary, proxyPort: context.proxy!.port, componentRoots: selection.componentRoots, baseEnvironment: baseEnvironment, runtimeBundleID: bundle.id.rawValue, displays: displays)
+                wineBinary: bundle.wineBinary, proxyPort: context.proxy!.port, componentRoots: selection.componentRoots, baseEnvironment: baseEnvironment, runtimeBundleID: selection.runtimeProfileID, displays: displays, gameModeRuntime: helper, gameModeEnabled: globalSettings.gameModeEnabled,
+                genshinFpsRiskAcknowledged: globalSettings.genshinFpsRiskAcknowledged)
+            context.fpsInjector = resolved.fpsInjector // Fresh launches only; reattachment never resolves a command.
             if !displays.isEmpty {
                 let selection = resolved.displayFallback ? "fallback" : (settings.display == nil ? "main" : "chosen")
                 note(context, "display=\(selection)")
@@ -372,27 +439,36 @@ public actor LaunchManager {
         prefix: URL, context: Context) async throws -> LaunchInjection.Prepared? {
         guard let injectionPreparation else { return nil }
         let backend = LaunchInjection.backendD3D11URL(for: bundle)
-        guard let configuration = try await injectionPreparation.prepare(gameID: game.id,
-            runtimeBundleID: bundle.id.rawValue, backendD3D11: backend) else { return nil }
-        // An enabled configuration is all-or-nothing: never quietly launch an
-        // unsupported edition, backend or runtime without the requested mods.
-        guard LaunchInjection.supports(game: game, bundle: bundle, settings: settings) else {
-            throw LauncherError.io("XXMI injection supports only Global Honkai: Star Rail with the verified D3DMetal runtime")
+        guard let configuration = try await injectionPreparation.prepare(game: game,
+            runtimeBundleID: bundle.id.rawValue, backendD3D11: backend, settings: settings) else { return nil }
+        do {
+            // An enabled configuration is all-or-nothing: never quietly launch an
+            // unsupported edition, backend or runtime without the requested mods.
+            guard LaunchInjection.supports(game: game, bundle: bundle, settings: settings) else {
+                throw LauncherError.io("XXMI injection supports Global Honkai: Star Rail and Zenless Zone Zero on the verified D3DMetal runtime with Direct3D 11")
+            }
+            let paths = paths
+            let prepared = try await BlockingIO.run {
+                try LaunchInjection.validate(configuration, paths: paths, prefix: prefix, bundle: bundle, game: game)
+            }
+            // The snapshot must be durable before any Wine helper can start.
+            context.session.injection = prepared.configuration
+            try await persist(context.session)
+            note(context, "injection snapshot prepared")
+            event("Injection prepared", game: game.id, metadata: ["runtimeBundle": bundle.id.rawValue])
+            return prepared
+        } catch {
+            // Nothing has run from this snapshot. A failed journal write may
+            // still have recorded it; a later finish treats the missing
+            // directory as already finished.
+            await injectionPreparation.discard(configuration: configuration)
+            throw error
         }
-        let paths = paths
-        let prepared = try await BlockingIO.run {
-            try LaunchInjection.validate(configuration, paths: paths, prefix: prefix, bundle: bundle)
-        }
-        // The snapshot must be durable before any Wine helper can start.
-        context.session.injection = prepared.configuration
-        try await persist(context.session)
-        note(context, "injection snapshot prepared")
-        event("Injection prepared", game: game.id, metadata: ["runtimeBundle": bundle.id.rawValue])
-        return prepared
     }
 
     private func watch(game: String, executable: String) async {
         guard let context = contexts[game] else { return }
+        if context.session.state == .running { await startQualificationMonitor(context) }
         let watcher = SessionWatcher(runtimesRoot: paths.runtimes, inspector: inspector, runner: runner, clock: clock)
         let reaper = context.ownedWrapper.map { OwnedWrapperReaper(identity: $0) }
         let supervisionClock = clock
@@ -402,10 +478,12 @@ public actor LaunchManager {
             do {
                 var watching = context.session
                 watching.state = context.watchPhase
-                try await watcher.watch(session: watching, executable: executable, ownedWrapper: context.ownedWrapper, ownedReaper: reaper) { processes in
+                try await watcher.watch(session: watching, executable: executable, ownedWrapper: context.ownedWrapper, ownedReaper: reaper,
+                    childrenEnded: { try await self.fpsChildHasEnded(game: game) }) { processes in
                     try await self.observed(game: game, processes: processes)
                 }
                 context.hasEnded = true
+                context.fpsWorker?.cancel()
                 context.endOutcome = context.ready ? "normal" : "before ready"
                 context.session.state = .ending; try await persist(context.session)
                 context.continuation?.yield(.ended(normal: context.ready))
@@ -420,6 +498,7 @@ public actor LaunchManager {
                 return
             } catch SessionWatchError.startup {
                 context.hasEnded = true
+                context.fpsWorker?.cancel()
                 context.endOutcome = "startup failure"
                 noteFailure(LauncherError.io("The game did not start"), stage: .watch, context: context)
                 context.continuation?.yield(.ended(normal: false)); await stopProxy(context)
@@ -446,14 +525,146 @@ public actor LaunchManager {
         context.watchPhase = .running
         context.session.startupPending = false
         context.session.state = .running
+        if processes.isEmpty {
+            context.runningTimer = nil; context.lastConfirmedElapsed = .zero
+        } else if let timer = context.runningTimer {
+            context.session.reachedRunning = true
+            let elapsed = timer()
+            let interval = (elapsed - context.lastConfirmedElapsed).components
+            let seconds = max(0, Double(interval.seconds) + Double(interval.attoseconds) / 1e18)
+            context.session.confirmedRunningSeconds = min(31_536_000, (context.session.confirmedRunningSeconds ?? 0) + seconds)
+            context.lastConfirmedElapsed = elapsed
+        } else {
+            context.session.reachedRunning = true
+            let timerClock = clock
+            let timer = AnyLaunchClock(timerClock)
+            context.runningTimer = { timer.now }
+        }
         context.session.processes = Array(Set(context.session.processes + processes)).sorted { $0.pid < $1.pid }
         try await persist(context.session)
+        if !processes.isEmpty { await startQualificationMonitor(context) }
         if !context.runningAnnounced, let process = processes.sorted(by: { $0.pid < $1.pid }).first {
             context.runningAnnounced = true
             note(context, "game process detected: pid \(process.pid)")
             event("Game running", game: game, metadata: ["pid": String(process.pid)])
             context.continuation?.yield(.running)
         }
+        if !processes.isEmpty { try await startFpsInjector(context) }
+    }
+
+    private func startQualificationMonitor(_ context: Context) async {
+        guard context.qualificationTask == nil, !context.hasEnded,
+            (context.session.confirmedRunningSeconds ?? 0) < 120 else { return }
+        let paths = paths, session = context.session
+        let needed = (try? await BlockingIO.run {
+            try RuntimeAutomaticUpdateStore(paths: paths).load().replacements.contains { record in
+                !record.verified && (record.familyID.hasPrefix("bundle-")
+                    ? record.replacementID == session.bundleID : session.componentIDs.contains(record.replacementID))
+            }
+        }) ?? false
+        guard needed, contexts[session.game] === context, !context.hasEnded else { return }
+        let sampleClock = clock
+        context.qualificationTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do { try await sampleClock.sleep(for: .seconds(5)) } catch { return }
+                guard let self else { return }
+                guard await self.sampleQualification(game: session.game, sessionID: session.sessionID) else { return }
+            }
+        }
+    }
+
+    private func sampleQualification(game: String, sessionID: UUID) async -> Bool {
+        guard let context = contexts[game], context.session.sessionID == sessionID, !context.hasEnded,
+            context.session.state == .running, (context.session.confirmedRunningSeconds ?? 0) < 120,
+            let executable = Self.executable(context.session) else { return false }
+        let session = context.session, inspector = inspector, root = paths.runtimes
+        let name = executable.replacingOccurrences(of: "\\", with: "/").split(separator: "/").last.map { $0.lowercased() } ?? ""
+        do {
+            let games = try await BlockingIO.run {
+                try inspector.processes(environmentContains: "WINEPREFIX", value: session.prefix.path,
+                    scope: session.inspectionScope(runtimesRoot: root)).filter { SessionWatcher.isGame($0, name: name) }.map(\.identity)
+            }
+            guard contexts[game] === context, !context.hasEnded, !Task.isCancelled else { return false }
+            guard !games.isEmpty else { context.runningTimer = nil; context.lastConfirmedElapsed = .zero; return false }
+            try await observed(game: game, processes: games)
+            return true
+        } catch {
+            context.runningTimer = nil; context.lastConfirmedElapsed = .zero
+            return false
+        }
+    }
+
+
+    private func startFpsInjector(_ context: Context) async throws {
+        guard let command = context.fpsInjector, !context.fpsAttempted, !context.hasEnded else { return }
+        context.fpsAttempted = true
+        let spawner = spawner, output = context.log?.processOutput ?? .discard
+        let identity: ProcessIdentity
+        do {
+            identity = try await BlockingIO.run {
+                let fs = try ContainedFileSystem(root: command.currentDirectory).pinRoot()
+                for path in [GenshinFps.injectorPath, GenshinFps.stubPath] {
+                    guard try fs.itemType(at: path) == .regularFile else { throw LauncherError.io("FPS helper files unavailable") }
+                }
+                return try spawner.spawn(command.executable, arguments: command.arguments, environment: command.environment,
+                    currentDirectory: command.currentDirectory, output: output)
+            }
+        } catch { fpsUnavailable(context, reason: "startupFailed"); return }
+        let child = OwnedSessionChild(identity: identity, read: fpsInjectorStatus)
+        context.fpsChild = child
+        context.session.processes = Array(Set(context.session.processes + [identity])).sorted { $0.pid < $1.pid }
+        context.session.processGroupIDs = (context.session.processGroupIDs ?? []).union([identity.pid])
+        // The child is irrevocably ours even if this journal write fails.
+        // Retain its reaper and let the normal watch/recovery retry own durability.
+        do { try await persist(context.session) }
+        catch { context.fpsWorker = Task { await self.watchFpsInjector(context, child: child) }; throw error }
+        context.fpsWorker = Task { await self.watchFpsInjector(context, child: child) }
+        event("FPS injector started", game: context.session.game)
+    }
+
+    private func fpsChildHasEnded(game: String) async throws -> Bool {
+        guard let child = contexts[game]?.fpsChild else { return true }
+        if case .exited = try await child.poll() { return true }
+        return false
+    }
+
+    private func watchFpsInjector(_ context: Context, child: OwnedSessionChild) async {
+        var reportedUncertainty = false
+        while !Task.isCancelled && !context.hasEnded {
+            do {
+                if case .exited(let code) = try await child.poll() {
+                    if code != 0 {
+                        let inspector = inspector, session = context.session
+                        let scope = session.inspectionScope(runtimesRoot: paths.runtimes)
+                        let name = Self.executable(session)?.lowercased() ?? ""
+                        let liveGame = try await BlockingIO.run {
+                            try inspector.processes(environmentContains: "WINEPREFIX", value: session.prefix.path, scope: scope)
+                                .contains { SessionWatcher.isGame($0, name: name) }
+                        }
+                        if liveGame, !context.hasEnded, contexts[session.game] === context {
+                            fpsUnavailable(context, reason: code == nil ? "exitStatusUnavailable" : "injectorExit", code: code)
+                        }
+                    }
+                    return
+                }
+            } catch {
+                guard !Task.isCancelled && !context.hasEnded else { return }
+                if !reportedUncertainty {
+                    event("FPS injector observation deferred", game: context.session.game, metadata: ["reason": "inspectionUnavailable"])
+                    reportedUncertainty = true
+                }
+            }
+            do { try await clock.sleep(for: .seconds(1)) } catch { return }
+        }
+    }
+
+    private func fpsUnavailable(_ context: Context, reason: String, code: Int32? = nil) {
+        guard !context.hasEnded else { return }
+        context.continuation?.yield(.note(.fpsUnlockUnavailable))
+        var fields = ["reason": reason]
+        if let code { fields["exitCode"] = String(code) }
+        event("FPS unlock unavailable", game: context.session.game, level: .warning, metadata: fields)
+        note(context, "FPS unlock unavailable: " + reason + (code.map { " exitCode=\($0)" } ?? ""))
     }
 
     private func restore(_ context: Context) async -> RestoreOutcome {
@@ -533,10 +744,35 @@ public actor LaunchManager {
     }
 
     private func verifiedEnd(_ context: Context) async throws {
-        guard context.hasEnded, context.session.endLogged != true else { return }
-        if let injection = context.session.injection {
+        guard context.hasEnded else { return }
+        if let qualification = context.qualificationTask {
+            qualification.cancel(); await qualification.value; context.qualificationTask = nil
+        }
+        // No new update can start once the session has ended; wait for one
+        // already publishing into this snapshot before harvesting it.
+        if context.session.endLogged != true, let apply = liveApplies[context.session.game] {
+            _ = await apply.result
+        }
+        // Harvest before the end is durable: a failed finish leaves endLogged
+        // unset so the next supervision or recovery attempt retries it.
+        if context.session.endLogged != true, let injection = context.session.injection {
             try await injectionPreparation?.finish(configuration: injection)
         }
+        if context.session.reachedRunning == true, context.session.reachedReady == true,
+            ["normal", "while MacGacha was closed"].contains(context.endOutcome), context.deferredFailure == nil {
+            let paths = paths, session = context.session
+            do {
+                try await BlockingIO.run {
+                    try RuntimeAutomaticUpdateStore(paths: paths).recordVerifiedSession(bundleID: session.bundleID,
+                        componentIDs: session.componentIDs, confirmedRunningSeconds: session.confirmedRunningSeconds ?? 0, sessionID: session.sessionID)
+                }
+            } catch {
+                // Cleanup proof is optional. Failure keeps the previous runtime,
+                // never the user's game files or launch recovery ownership.
+                event("Automatic cleanup proof unavailable", game: session.game, level: .warning)
+            }
+        }
+        guard context.session.endLogged != true else { return }
         var snapshot = context.session
         snapshot.endLogged = true
         snapshot.startupPending = false
@@ -574,7 +810,8 @@ public actor LaunchManager {
         // in-memory status; the next supervision/guard attempt reads it again.
         do {
             if var persisted = try await read(game: context.session.game), persisted.sessionID == context.session.sessionID {
-                if let owned = context.ownedWrapper {
+                // Spawned children stay ours even when their first journal write failed.
+                for owned in [context.ownedWrapper, context.fpsChild?.identity].compactMap({ $0 }) {
                     if !persisted.processes.contains(owned) { persisted.processes.append(owned) }
                     persisted.processGroupIDs = (persisted.processGroupIDs ?? []).union([owned.pid])
                 }
@@ -638,7 +875,91 @@ public actor LaunchManager {
 
     public func reattachStartup() async -> LaunchStartupResult {
         let sessions = await reattachAll()
+        await sweepInjectionSessions()
         return LaunchStartupResult(sessions: sessions, unresolved: unresolvedStartup)
+    }
+
+    /// Reclaims injection snapshots left by crashes or earlier builds. Each game
+    /// is swept only while this instance has no claim on it and its session lock
+    /// is acquired, which excludes other MacGacha instances preparing, running or
+    /// finishing a session. Every journal and live snapshot is retained.
+    private func sweepInjectionSessions() async {
+        guard let injectionPreparation, !recovering, guardRecoveries.isEmpty else { return }
+        // Holding the recovery reservation across awaits keeps launch and
+        // guarded recovery out while a sweep is in flight.
+        recovering = true
+        defer { recovering = false }
+        let games = Recipes.games.filter { GameDefinition.find($0).map(LaunchInjection.mayInject) ?? false }
+        for game in games {
+            guard contexts[game] == nil, supervision[game] == nil, reservedGame != game,
+                !unresolvedStartup.contains(game), !guardRecoveries.contains(game) else { continue }
+            let paths = paths, journalFileOps = journalFileOps, beforeJournalRead = beforeJournalRead
+            let owned: (lock: SessionLock, retained: [URL])?
+            do {
+                owned = try await BlockingIO.run { () throws -> (lock: SessionLock, retained: [URL])? in
+                    let lock = try SessionLock.acquire(paths: paths, game: game)
+                    let journal = LaunchJournal(paths: paths, fileOps: journalFileOps, beforeRead: beforeJournalRead)
+                    var retained: [URL] = []
+                    for other in games {
+                        guard let session = try journal.read(game: other) else { continue }
+                        // An unreattached journal for this game needs recovery
+                        // first; never sweep beside it.
+                        if other == game { return nil }
+                        if let injection = session.injection { retained.append(injection.sessionDirectory) }
+                    }
+                    return (lock, retained)
+                }
+            } catch { continue }
+            guard let owned else { continue }
+            let live = contexts.values.compactMap { $0.session.injection?.sessionDirectory }
+            var seen: Set<String> = []
+            let retained = (owned.retained + live).filter { seen.insert($0.standardizedFileURL.path).inserted }
+            await injectionPreparation.sweepSessions(gameID: game, retaining: retained)
+            withExtendedLifetime(owned.lock) {}
+        }
+    }
+
+    /// Explicit, user-requested publication of the current enabled mods into
+    /// the running session's snapshot. There is no automatic watcher: the
+    /// player asks for this and then reloads mods in game. The journal is
+    /// authoritative for which snapshot is active.
+    public func applyLiveInjectionUpdate(game: String) async throws {
+        guard let injectionPreparation else { throw LauncherError.io("Live mod updates are unavailable") }
+        guard liveApplies[game] == nil else { throw LauncherError.busy("A mod update is already being applied") }
+        let context = try liveApplyContext(game: game)
+        let task = Task<Void, any Error> {
+            let persisted = try await self.read(game: game)
+            // Reentrancy: the session may have ended or been replaced while
+            // the journal was read.
+            guard try self.liveApplyContext(game: game) === context, let persisted,
+                persisted.sessionID == context.session.sessionID, persisted.state == .running,
+                persisted.endLogged != true, let injection = persisted.injection,
+                injection == context.session.injection else {
+                throw LauncherError.busy("The game is not running with mods")
+            }
+            try await injectionPreparation.applyLive(configuration: injection)
+        }
+        liveApplies[game] = task
+        defer { liveApplies[game] = nil }
+        do {
+            try await task.value
+            note(context, "live mod update applied")
+            event("Live mod update applied", game: game)
+        } catch {
+            event("Live mod update failed", game: game, level: .error,
+                metadata: Self.failureMetadata(error, stage: .watch))
+            throw error
+        }
+    }
+
+    private func liveApplyContext(game: String) throws -> Context {
+        guard !recovering, !guardRecoveries.contains(game), let context = contexts[game],
+            supervision[game] != nil, !context.hasEnded, context.watchPhase == .running,
+            context.session.state == .running, context.session.endLogged != true,
+            context.finalization == nil, context.session.injection != nil else {
+            throw LauncherError.busy("The game is not running with mods")
+        }
+        return context
     }
 
     private func reattachAll(recoveryGame: String?) async -> [String: LaunchSession] {

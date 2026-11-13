@@ -6,6 +6,13 @@ import LauncherCore
 import DownloadEngine
 
 public struct ComponentInstaller: Sendable {
+    func relocated(to store: RuntimeStore) -> ComponentInstaller {
+        if let fetcher, let extractor {
+            return ComponentInstaller(store: store, consent: consent, fetcher: fetcher, extractor: extractor,
+                disk: disk, fileOps: fileOps, failurePoint: failurePoint)
+        }
+        return ComponentInstaller(store: store, consent: consent, disk: disk, fileOps: fileOps, failurePoint: failurePoint)
+    }
     /// Deterministic failure boundaries for publish/recovery tests. The default is a no-op.
     public enum PublishPoint: Sendable, Equatable { case beforePublish, afterPublish }
 
@@ -134,7 +141,7 @@ fileprivate actor ComponentInstallSession {
                 if lease == nil { lock = try InstallLock(fs: fs, path: SafeRelativePath("\(runtimes)/.lock")) }
                 self.fs = fs
                 if pins == nil { pins = try RuntimeRemovalLease(paths: store.paths, componentIDs: [component.id.rawValue]) }
-                try store.sweepStaging()
+                try store.sweepStaging(holding: pins, deleting: { try $0.removeItem(at: $1) })
                 let kind = try SafeRelativePath("\(runtimes)/\(component.kind.rawValue)")
                 try fs.createDirectory(at: kind)
                 let destination = try RuntimeJSONFile.relativePath(store.installURL(for: component), root: store.paths.root)
@@ -239,7 +246,7 @@ fileprivate actor ComponentInstallSession {
                 let fs = try filesystem()
                 if let incoming { try fs.removeItem(at: incoming) }
                 if let downloads { try fs.removeItem(at: downloads) }
-                step = .done; lock = nil; lease = nil; pins = nil
+                step = .done; releaseLocks()
                 return .phase(.completed)
             case .done: return nil
             }
@@ -273,7 +280,13 @@ fileprivate actor ComponentInstallSession {
                 try? fs.removeItem(at: parent)
             }
         }
-        step = .done; lock = nil; lease = nil; pins = nil
+        step = .done; releaseLocks()
+    }
+
+    /// The store lock is the outermost lock: release component pins first, so a
+    /// caller that sees the store free can immediately take its pins too.
+    private func releaseLocks() {
+        pins = nil; lease = nil; lock = nil
     }
 
     private func filesystem() throws -> ContainedFileSystem {

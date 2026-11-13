@@ -117,23 +117,14 @@ enum ModSupportFileSystem {
         }
     }
 
-    private static func copyFile(_ source: ContainedFileSystem, _ sourcePath: SafeRelativePath,
-        _ destination: ContainedFileSystem, _ destinationPath: SafeRelativePath, size: Int64) throws {
-        let input = try source.openForReading(at: sourcePath)
-        defer { try? input.close() }
-        let output = try destination.openForWriting(at: destinationPath, truncate: true)
-        defer { try? output.close() }
-        var copied: Int64 = 0
-        while true {
-            guard !Task.isCancelled else { throw LauncherError.cancelled }
-            let data = try autoreleasepool { try input.read(upToCount: 65_536) ?? Data() }
-            if data.isEmpty { break }
-            let (sum, overflow) = copied.addingReportingOverflow(Int64(data.count))
-            guard !overflow, sum <= size else { throw LauncherError.io("Mod source changed during import") }
-            try output.write(contentsOf: data)
-            copied = sum
-        }
-        guard copied == size else { throw LauncherError.io("Mod source changed during import") }
+    /// Copies into a new, exclusively owned file. Cloning is deferred until a safe
+    /// retained-descriptor implementation is available. The preference is retained
+    /// for regression tests that ensure requesting it cannot bypass safe streaming.
+    static func copyFile(_ source: ContainedFileSystem, _ sourcePath: SafeRelativePath,
+        _ destination: ContainedFileSystem, _ destinationPath: SafeRelativePath, size: Int64,
+        preferClone: Bool = false, afterCopy: (() throws -> Void)? = nil) throws {
+        try ModSupportFileCopy.copy(source, sourcePath, destination, destinationPath, size: size,
+            preferClone: preferClone, afterCopy: afterCopy)
     }
 
     private static func validateRegularModFile(_ fs: ContainedFileSystem, path: SafeRelativePath) throws {

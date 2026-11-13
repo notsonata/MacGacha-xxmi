@@ -4,9 +4,7 @@ import Foundation
 import LauncherCore
 
 enum ModSupportConstants {
-    static let gameID = "starrail"
     static let runtimeBundleID = "d3dmetal-wine11.20-gptk4.0b3"
-    static let runnerTarget = "StarRail.exe"
     static let maximumStateBytes = 1 << 20
     static let maximumSettingsTextBytes = 64 << 10
     static let maximumSRMIUserConfigBytes = 1 << 20
@@ -18,6 +16,7 @@ enum ModSupportConstants {
 
 struct ModSupportLayout: Sendable {
     let root: URL
+    let profile: ModSupportProfile
     let xxmiRoot: URL
     let versions: URL
     let gameRoot: URL
@@ -25,23 +24,43 @@ struct ModSupportLayout: Sendable {
     let packages: URL
     let sessions: URL
     let staging: URL
+    private let versionsPath: String
+    private let gamePath: String
+    private let sessionsPath: String
+    private let stagingRootPath: String
 
-    init(paths: AppPaths) {
+    init(paths: AppPaths, profile: ModSupportProfile = .starRail) {
         root = paths.root
+        self.profile = profile
         xxmiRoot = paths.root.appendingPathComponent("XXMI", isDirectory: true)
-        versions = xxmiRoot.appendingPathComponent("Versions", isDirectory: true)
-        gameRoot = xxmiRoot.appendingPathComponent("Games", isDirectory: true)
-            .appendingPathComponent(ModSupportConstants.gameID, isDirectory: true)
+        versionsPath = Self.versionsPath(for: profile)
+        gamePath = "XXMI/Games/\(profile.gameID)"
+        sessionsPath = Self.sessionsPath(for: profile)
+        stagingRootPath = Self.stagingRootPath(for: profile)
+        versions = paths.root.appendingPathComponent(versionsPath, isDirectory: true)
+        gameRoot = paths.root.appendingPathComponent(gamePath, isDirectory: true)
         modsDirectory = gameRoot.appendingPathComponent("Mods", isDirectory: true)
         packages = gameRoot.appendingPathComponent("Packages", isDirectory: true)
-        sessions = xxmiRoot.appendingPathComponent("Sessions", isDirectory: true)
-        staging = xxmiRoot.appendingPathComponent(".staging", isDirectory: true)
+        sessions = paths.root.appendingPathComponent(sessionsPath, isDirectory: true)
+        staging = paths.root.appendingPathComponent(stagingRootPath, isDirectory: true)
+    }
+
+    private static func versionsPath(for profile: ModSupportProfile) -> String {
+        profile == .starRail ? "XXMI/Versions" : "XXMI/Versions/\(profile.gameID)"
+    }
+
+    private static func sessionsPath(for profile: ModSupportProfile) -> String {
+        profile == .starRail ? "XXMI/Sessions" : "XXMI/Sessions/\(profile.gameID)"
+    }
+
+    private static func stagingRootPath(for profile: ModSupportProfile) -> String {
+        profile == .starRail ? "XXMI/.staging" : "XXMI/.staging/\(profile.gameID)"
     }
 
     func ensureDirectories(_ fs: ContainedFileSystem, includeMods: Bool = true) throws {
-        var paths = ["XXMI", "XXMI/Versions", "XXMI/Games/starrail/Packages", "XXMI/Games/starrail/User",
-            "XXMI/Sessions", "XXMI/.staging"]
-        if includeMods { paths.append("XXMI/Games/starrail/Mods") }
+        var paths = ["XXMI", "XXMI/Versions", versionsPath, "\(gamePath)/Packages",
+            "\(gamePath)/User", "XXMI/Sessions", sessionsPath, "XXMI/.staging", stagingRootPath]
+        if includeMods { paths.append("\(gamePath)/Mods") }
         for path in paths {
             try fs.createDirectory(at: SafeRelativePath(path))
         }
@@ -53,27 +72,31 @@ struct ModSupportLayout: Sendable {
         return URL(fileURLWithPath: custom, isDirectory: true)
     }
 
-    var statePath: SafeRelativePath { try! SafeRelativePath("XXMI/Games/starrail/state.json") }
-    var userConfigPath: SafeRelativePath { try! SafeRelativePath("XXMI/Games/starrail/User/d3dx-user.json") }
+    var statePath: SafeRelativePath { try! SafeRelativePath("\(gamePath)/state.json") }
+    var userDirectoryPath: SafeRelativePath { try! SafeRelativePath("\(gamePath)/User") }
+    var userConfigPath: SafeRelativePath { try! SafeRelativePath("\(gamePath)/User/d3dx-user.json") }
 
     func packagePath(for version: String) -> SafeRelativePath {
-        try! SafeRelativePath("XXMI/Versions/\(version)")
+        try! SafeRelativePath("\(versionsPath)/\(version)")
     }
 
     func manifestPath(for version: String) -> SafeRelativePath {
-        try! SafeRelativePath("XXMI/Games/starrail/Packages/\(version).json")
+        try! SafeRelativePath("\(gamePath)/Packages/\(version).json")
     }
 
     func sessionPath(_ name: String) -> SafeRelativePath {
-        try! SafeRelativePath("XXMI/Sessions/\(name)")
+        try! SafeRelativePath("\(sessionsPath)/\(name)")
     }
 
+    var sessionsRootPath: SafeRelativePath { try! SafeRelativePath(sessionsPath) }
+    var stagingRootRelativePath: SafeRelativePath { try! SafeRelativePath(stagingRootPath) }
+
     func stagingPath(_ name: String) -> SafeRelativePath {
-        try! SafeRelativePath("XXMI/.staging/\(name)")
+        try! SafeRelativePath("\(stagingRootPath)/\(name)")
     }
 
     func sessionMarkerPath(_ name: String) -> SafeRelativePath {
-        try! SafeRelativePath("XXMI/Sessions/\(name)/.macgacha-session.json")
+        try! SafeRelativePath("\(sessionsPath)/\(name)/.macgacha-session.json")
     }
 }
 

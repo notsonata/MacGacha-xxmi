@@ -71,14 +71,14 @@ extension ModSupportStore {
         guard data.count <= ModSupportConstants.maximumSRMIUserConfigEncodedBytes else {
             throw LauncherError.io("mod support user settings exceed their size limit")
         }
-        try fs.createDirectory(at: SafeRelativePath("XXMI/Games/starrail/User"))
+        try fs.createDirectory(at: layout.userDirectoryPath)
         try writeAtomicallyReconciled(data, to: layout.userConfigPath, fs: fs)
     }
 
-    private static func sessionUserConfigPath(_ sessionName: String,
+    private static func sessionUserConfigPath(_ sessionName: String, layout: ModSupportLayout,
         payloadDirectory: SafeRelativePath?) -> SafeRelativePath {
         let prefix = payloadDirectory.map { $0.description + "/" } ?? ""
-        return try! SafeRelativePath("XXMI/Sessions/\(sessionName)/\(prefix)\(userConfigName)")
+        return try! SafeRelativePath("\(layout.sessionPath(sessionName).description)/\(prefix)\(userConfigName)")
     }
 
     /// Adds the durable user file and a baseline marker to a fresh session.
@@ -87,7 +87,7 @@ extension ModSupportStore {
         payloadDirectory: SafeRelativePath?) throws {
         let stored = try loadStoredUserConfig(layout: layout, fs: fs)
         if let data = stored.data {
-            let path = sessionUserConfigPath(sessionName, payloadDirectory: payloadDirectory)
+            let path = sessionUserConfigPath(sessionName, layout: layout, payloadDirectory: payloadDirectory)
             try fs.writeAtomically(data, to: path)
         }
         let marker = SessionUserConfigMarker(baselineRevision: stored.revision,
@@ -113,25 +113,30 @@ extension ModSupportStore {
         let name = String(directory.dropFirst(prefix.count))
         guard !name.isEmpty, !name.contains("/") else { throw LauncherError.unsafePath(directory) }
         _ = try SafeIdentifier(name)
+        // Sessions are always canonical UUIDs. This also keeps the Star Rail
+        // store away from `Sessions/zzz`, which belongs to another profile.
+        guard isCanonicalSessionName(name) else { throw LauncherError.unsafePath(directory) }
         return name
     }
 
-    static func finishLaunch(sessionDirectory: URL, layout: ModSupportLayout,
-        fileOps: any FileOps) throws -> ModUserSettingsOutcome {
-        let name = try sessionName(for: sessionDirectory, layout: layout)
-        let fs = try ContainedFileSystem(root: layout.root, fileOps: fileOps)
-        let sessionPath = layout.sessionPath(name)
-        guard try fs.itemType(at: sessionPath) == .directory else {
-            throw LauncherError.unsafePath(sessionDirectory.path)
-        }
+    static func isCanonicalSessionName(_ name: String) -> Bool {
+        UUID(uuidString: name)?.uuidString == name
+    }
+
+    static func canonicalSessionName(for url: URL, layout: ModSupportLayout) throws -> String {
+        try sessionName(for: url, layout: layout)
+    }
+
+    private static func loadSessionMarker(_ name: String, layout: ModSupportLayout,
+        fs: ContainedFileSystem) throws -> SessionUserConfigMarker? {
         let markerPath = layout.sessionMarkerPath(name)
-        guard let markerType = try fs.itemType(at: markerPath) else { return .notPrepared }
+        guard let markerType = try fs.itemType(at: markerPath) else { return nil }
         guard markerType == .regularFile else { throw LauncherError.unsafePath(markerPath.description) }
-        let marker: SessionUserConfigMarker
         do {
             let data = try fs.readFile(at: markerPath, maxBytes: ModSupportConstants.maximumSRMIUserConfigEncodedBytes)
-            marker = try JSONDecoder().decode(SessionUserConfigMarker.self, from: data)
+            let marker = try JSONDecoder().decode(SessionUserConfigMarker.self, from: data)
             try marker.validate()
+            return marker
         } catch LauncherError.cancelled {
             throw LauncherError.cancelled
         } catch let error as LauncherError {
@@ -139,6 +144,36 @@ extension ModSupportStore {
         } catch {
             throw LauncherError.journalCorrupt("mod support session marker is invalid")
         }
+    }
+
+    /// The payload directory recorded by an active, not yet finished session.
+    /// A missing marker means the session was finished or never prepared.
+    static func activeSessionPayload(_ name: String, layout: ModSupportLayout,
+        fs: ContainedFileSystem) throws -> SafeRelativePath?? {
+        guard let marker = try loadSessionMarker(name, layout: layout, fs: fs) else { return nil }
+        return .some(try marker.payloadDirectory.map { value -> SafeRelativePath in
+            let path = try SafeRelativePath(value)
+            guard path.description == value else {
+                throw LauncherError.journalCorrupt("mod support session marker is invalid")
+            }
+            return path
+        })
+    }
+
+    /// Harvests the user file; the caller reclaims the directory afterwards
+    /// unless the result is `.alreadyFinished`. A failed save throws and keeps
+    /// the session and its marker for a later retry.
+    static func finishLaunch(sessionDirectory: URL, layout: ModSupportLayout,
+        fileOps: any FileOps) throws -> ModUserSettingsOutcome {
+        let name = try sessionName(for: sessionDirectory, layout: layout)
+        let fs = try ContainedFileSystem(root: layout.root, fileOps: fileOps)
+        let sessionPath = layout.sessionPath(name)
+        guard let sessionType = try fs.itemType(at: sessionPath) else { return .alreadyFinished }
+        guard sessionType == .directory else {
+            throw LauncherError.unsafePath(sessionDirectory.path)
+        }
+        let markerPath = layout.sessionMarkerPath(name)
+        guard let marker = try loadSessionMarker(name, layout: layout, fs: fs) else { return .notPrepared }
         let stored = try loadStoredUserConfig(layout: layout, fs: fs)
         guard stored.revision == marker.baselineRevision else { return .superseded }
         let payload = try marker.payloadDirectory.map { value -> SafeRelativePath in
@@ -148,7 +183,7 @@ extension ModSupportStore {
             }
             return path
         }
-        let configPath = sessionUserConfigPath(name, payloadDirectory: payload)
+        let configPath = sessionUserConfigPath(name, layout: layout, payloadDirectory: payload)
         let data: Data?
         if let type = try fs.itemType(at: configPath) {
             guard type == .regularFile else { throw LauncherError.unsafePath(configPath.description) }

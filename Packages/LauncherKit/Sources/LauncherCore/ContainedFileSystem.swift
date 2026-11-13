@@ -476,6 +476,98 @@ public struct ContainedFileSystem: Sendable, Hashable {
         try synchronize(parent)
     }
 
+    /// Reclaims an app-owned tree that may exceed one listing budget. Every
+    /// directory is reopened and listed in bounded batches with a fresh budget,
+    /// so neither the 100,000-entry operation limit nor a single large directory
+    /// can abort removal. Symlinks inside the tree are unlinked, never followed.
+    /// Cancellation is ignored: callers use it for cleanup that must finish.
+    package func removeTreeInBatches(at path: SafeRelativePath) throws {
+        guard let parent = try uncancelledDirectory(Array(path.components.dropLast())) else { return }
+        defer { close(parent) }
+        try removeBatchedEntry(path.components.last!, parent: parent, display: display(path.components),
+            insideTree: false, depth: 0)
+        try synchronize(parent)
+    }
+
+    private func uncancelledDirectory(_ components: [String]) throws -> Int32? {
+        guard components.count <= 128 else { throw LauncherError.io("Directory depth exceeds limit") }
+        var fd = pinnedRoot.map { openat($0.fd, ".", Self.directoryFlags) } ?? open(root.path, Self.directoryFlags)
+        guard fd >= 0 else {
+            if errno == ENOENT { return nil }
+            throw accessError(root.path)
+        }
+        if let expectedRootIdentity, try identityProvider.identity(of: fd) != expectedRootIdentity {
+            close(fd)
+            throw LauncherError.io("install folder was replaced")
+        }
+        for component in components {
+            guard let info = try entry(component, parent: fd) else { close(fd); return nil }
+            guard info.st_mode & S_IFMT == S_IFDIR else { close(fd); throw LauncherError.unsafePath(component) }
+            let next = openat(fd, component, Self.directoryFlags)
+            close(fd)
+            guard next >= 0 else { throw accessError(component) }
+            fd = next
+        }
+        return fd
+    }
+
+    private func removeBatchedEntry(_ name: String, parent: Int32, display: String, insideTree: Bool,
+        depth: Int) throws {
+        guard depth <= 128 else { throw LauncherError.io("Removal depth exceeds limit") }
+        guard let info = try entry(name, parent: parent) else { return }
+        guard info.st_mode & S_IFMT == S_IFDIR else {
+            guard insideTree || info.st_mode & S_IFMT == S_IFREG else { throw LauncherError.unsafePath(display) }
+            try fileOps.unlink(name, in: parent, isDirectory: false)
+            return
+        }
+        let batchSize = 4096
+        while true {
+            // A fresh descriptor restarts the listing; removed entries are gone.
+            let fd = openat(parent, name, Self.directoryFlags)
+            guard fd >= 0 else { throw accessError(display) }
+            defer { close(fd) }
+            var opened = stat()
+            guard fstat(fd, &opened) == 0, opened.st_dev == info.st_dev, opened.st_ino == info.st_ino else {
+                throw LauncherError.io("Removal directory changed")
+            }
+            var budget = batchSize
+            let batch = try uncancelledNames(in: fd, budget: &budget, maximumEntries: batchSize)
+            if batch.isEmpty { break }
+            for child in batch {
+                try removeBatchedEntry(child, parent: fd, display: display + "/" + child, insideTree: true,
+                    depth: depth + 1)
+            }
+        }
+        try fileOps.unlink(name, in: parent, isDirectory: true)
+    }
+
+    private func uncancelledNames(in fd: Int32, budget: inout Int, maximumEntries: Int) throws -> [String] {
+        let duplicate = dup(fd)
+        guard duplicate >= 0 else { throw LauncherError.io("Cannot duplicate directory descriptor") }
+        guard let stream = fdopendir(duplicate) else {
+            close(duplicate)
+            throw LauncherError.io("Cannot open directory stream")
+        }
+        defer { closedir(stream) }
+        rewinddir(stream)
+        var result: [String] = []
+        while budget > 0, result.count < maximumEntries {
+            errno = 0
+            guard let item = readdir(stream) else {
+                if errno != 0 { throw LauncherError.io("Cannot list directory") }
+                break
+            }
+            let bytes = withUnsafeBytes(of: item.pointee.d_name) { Array($0.prefix { $0 != 0 }) }
+            if bytes == [0x2e] || bytes == [0x2e, 0x2e] { continue }
+            guard let name = String(bytes: bytes, encoding: .utf8) else {
+                throw LauncherError.unsafePath("Invalid UTF-8 directory entry")
+            }
+            budget -= 1
+            result.append(name)
+        }
+        return result
+    }
+
     /// Atomically moves a regular file or directory without replacing the destination.
     /// Creates missing destination parents and fsyncs both parents after the rename.
     /// Cleanup may explicitly move a non-regular source leaf itself; ancestors are always checked.
@@ -648,8 +740,10 @@ public struct ContainedFileSystem: Sendable, Hashable {
     }
 
     /// Snapshot of an extracted tree, never following a symbolic link. Special files and
-    /// hard links with names outside this tree are refused. Bounded like other tree operations.
-    package func inspectTree(at path: SafeRelativePath) throws -> [TreeEntry] {
+    /// hard links with names outside this tree are refused by default. Owned runtime
+    /// mirrors may explicitly allow them; untrusted archive/import callers must not.
+    /// Bounded like other tree operations.
+    package func inspectTree(at path: SafeRelativePath, allowingExternalHardLinks: Bool = false) throws -> [TreeEntry] {
         guard let fd = try directory(path.components, create: false) else { throw LauncherError.io("Directory is missing") }
         defer { close(fd) }
         var budget = Self.entryLimit
@@ -676,7 +770,7 @@ public struct ContainedFileSystem: Sendable, Hashable {
             result.append(TreeEntry(path: relative, type: type == S_IFDIR ? .directory : type == S_IFREG ? .regularFile : .other,
                 linkTarget: target, size: uniqueSize))
         }
-        guard hardlinks.values.allSatisfy({ $0.count == $0.expected }) else { throw LauncherError.unsafePath(path.description) }
+        guard allowingExternalHardLinks || hardlinks.values.allSatisfy({ $0.count == $0.expected }) else { throw LauncherError.unsafePath(path.description) }
         return result
     }
 
@@ -749,6 +843,17 @@ public struct ContainedFileSystem: Sendable, Hashable {
         guard try entry(name, parent: parent) == nil else { throw LauncherError.unsafePath(path.description) }
         guard symlinkat(target, parent, name) == 0 else { throw LauncherError.fileSystemFailure("Cannot create import link") }
         try synchronize(parent)
+    }
+
+    /// Identity of a no-follow regular-file descriptor, including its birth time.
+    package func regularFileIdentity(at path: SafeRelativePath) throws -> OwnedFileIdentity {
+        let file = try openForReading(at: path)
+        defer { try? file.close() }
+        var info = stat()
+        guard fstat(file.fileDescriptor, &info) == 0, info.st_mode & S_IFMT == S_IFREG else {
+            throw LauncherError.io("Cannot inspect runtime inode")
+        }
+        return OwnedFileIdentity(info)
     }
 
     /// Creates a literal hardlink between checked parents. Only a regular file

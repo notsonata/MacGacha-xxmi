@@ -63,7 +63,7 @@ enum RuntimeSetupItemState {
         #if DEBUG
         if debugLaunchRuntimesReady { return [] }
         #endif
-        guard GameDefinition.find(gameID) != nil, let manifest,
+        guard GameDefinition.find(gameID) != nil, let manifest = dependencySetupTarget(for: gameID)?.manifest ?? effectiveRuntimeManifest,
             let bundle = manifest.defaultBundle(for: launchSettings(for: gameID).backend) else { return nil }
         var result: [RuntimeSetupRequirement] = []
         if installedBundles[bundle.id.rawValue] == nil {
@@ -72,13 +72,19 @@ enum RuntimeSetupItemState {
                 size: RuntimeSetupPlan.total(components.map(\.size))), components: components))
         }
         guard let recipe = Recipes.recipe(for: gameID) else { return nil }
-        let required = LaunchResolver.requiredComponents(recipe: recipe, settings: launchSettings(for: gameID),
-            runtimeBundleID: bundle.id.rawValue)
+        var settings = launchSettings(for: gameID)
+        // Launch ignores an unconfirmed Genshin unlock, so setup must not ask for its helper.
+        if GenshinFps.applies(to: gameID) && !genshinFpsRiskAcknowledged { settings.unlockFPS = false }
+        let required = LaunchResolver.requiredComponents(recipe: recipe, settings: settings,
+            runtimeBundleID: runtimeProfile(for: settings.backend))
         // Keep the ABI-specific Wine correction beside its bundle, before optional wrappers.
-        let kinds = required.filter { $0 == .crypt32Fix } + required.filter { $0 != .crypt32Fix }
+        let scoped: Set<ComponentKind> = [.crypt32Fix, .surroundAudio, .genshinFps]
+        let kinds = required.filter { scoped.contains($0) } + required.filter { !scoped.contains($0) }
         for kind in kinds {
             guard let component = manifest.components.first(where: {
-                $0.kind == kind && (kind != .crypt32Fix || $0.id.rawValue == Crypt32Fix.componentID)
+                $0.kind == kind && (kind != .crypt32Fix || runtimeCatalog != nil || $0.id.rawValue == Crypt32Fix.componentID)
+                    && (kind != .surroundAudio || runtimeCatalog != nil || $0.id.rawValue == SurroundAudio.componentID)
+                    && (kind != .genshinFps || runtimeCatalog != nil || $0.id.rawValue == GenshinFps.componentID)
             }) else { return nil }
             if !installed.contains(where: { $0.kind == kind && $0.version == component.version.rawValue }) {
                 result.append(RuntimeSetupRequirement(item: .init(id: component.id.rawValue, name: Self.kindName(kind),
@@ -92,11 +98,23 @@ enum RuntimeSetupItemState {
         guard canBeginGameOrRuntimeOperation() else { return }
         guard runtimeSetupChains[gameID] == nil, runtimeSetupRosettaChecks[gameID] == nil,
             let plan = runtimeSetupPlan(for: gameID), let first = plan.items.first else { return }
+        let automaticTarget = dependencySetupTarget(for: gameID)
+        if let automaticTarget {
+            guard canChangeRuntimeCatalog, !isModSupportBusy else { return }
+            runtimeCatalogMutationID = first.id; catalogActivationTargets[gameID] = automaticTarget
+            automaticCatalogSetupKeys.insert(gameID)
+        }
+        for item in plan.items { captureRuntimeInstallContext(item.id, manifest: automaticTarget?.catalog.manifest ?? effectiveRuntimeManifest) }
         setRuntimeSetupProgress(.installing(item: first.name, step: 1, of: plan.items.count, fraction: nil), for: gameID)
         let generation = UUID()
         let task = Task { [weak self] in
             guard let self else { return }
-            defer { if self.runtimeSetupRosettaChecks[gameID]?.id == generation { self.runtimeSetupRosettaChecks[gameID] = nil } }
+            defer {
+                if self.runtimeSetupRosettaChecks[gameID]?.id == generation {
+                    self.runtimeSetupRosettaChecks[gameID] = nil
+                    if self.runtimeSetupChains[gameID] == nil { self.finishCatalogSetup(gameID, succeeded: false) }
+                }
+            }
             await self.refreshRosetta()
             guard !Task.isCancelled, self.runtimeSetupRosettaChecks[gameID]?.id == generation else { return }
             if self.rosetta == .missing {
@@ -111,10 +129,17 @@ enum RuntimeSetupItemState {
     }
 
     func cancelRuntimeSetup(for gameID: String) {
-        if let check = runtimeSetupRosettaChecks.removeValue(forKey: gameID) {
+        if catalogActivationTargets[gameID] != nil, let chain = runtimeSetupChains[gameID] {
+            // Revoke intent now; the normal reducer releases the reservation
+            // only after the installer task and its readers have drained.
+            cancel(chain.plan.items[chain.index].id)
+            return
+        }
+        if let check = runtimeSetupRosettaChecks[gameID] {
             check.task.cancel(); setRuntimeSetupProgress(nil, for: gameID)
         }
         guard let chain = runtimeSetupChains.removeValue(forKey: gameID) else { return }
+        finishCatalogSetup(gameID, succeeded: false)
         setRuntimeSetupProgress(nil, for: gameID)
         let id = chain.plan.items[chain.index].id
         // A shared item continues for its other subscriber. Joining a manual
@@ -142,7 +167,7 @@ enum RuntimeSetupItemState {
         }
     }
 
-    private func advanceRuntimeSetups() {
+    func advanceRuntimeSetups() {
         for gameID in runtimeSetupChains.keys.sorted() {
             while var chain = runtimeSetupChains[gameID] {
                 let item = chain.plan.items[chain.index]
@@ -155,6 +180,7 @@ enum RuntimeSetupItemState {
                     chain.index += 1; chain.attempted = false
                     if chain.index == chain.plan.items.count {
                         runtimeSetupChains[gameID] = nil; setRuntimeSetupProgress(nil, for: gameID)
+                        finishCatalogSetup(gameID, succeeded: true)
                     } else { runtimeSetupChains[gameID] = chain }
                     continue
                 case .busy(let fraction):
@@ -163,9 +189,11 @@ enum RuntimeSetupItemState {
                 case .failed(let message) where chain.attempted:
                     runtimeSetupChains[gameID] = nil; runtimeSetupOwnedItems.remove(item.id)
                     setRuntimeSetupProgress(.failed(message: message), for: gameID)
+                    finishCatalogSetup(gameID, succeeded: false)
                 case .idle where chain.attempted:
                     runtimeSetupChains[gameID] = nil; runtimeSetupOwnedItems.remove(item.id)
                     setRuntimeSetupProgress(nil, for: gameID)
+                    finishCatalogSetup(gameID, succeeded: false)
                 case .idle, .failed, .blocked:
                     setRuntimeSetupProgress(progress(nil), for: gameID)
                     if canStartRuntimeSetupItem {

@@ -57,12 +57,17 @@ func makeZip(source: URL, archive: URL, extraArguments: [String] = [], storeSyml
 struct PackageFixture {
     let root: URL
     let version: String
+    let gameID: String
+    let packageID: String
     let archive: URL
     let files: [String: Data]
 
-    init(root: URL, version: String = fixtureVersion, overrides: [String: Data] = [:]) throws {
+    init(root: URL, version: String = fixtureVersion, gameID: String = "starrail",
+        packageID: String = "srmi", overrides: [String: Data] = [:]) throws {
         self.root = root
         self.version = version
+        self.gameID = gameID
+        self.packageID = packageID
         let source = root.appendingPathComponent("package-\(UUID().uuidString)", isDirectory: true)
         var contents: [String: Data] = [
             "hook-runner.exe": Data("runner".utf8),
@@ -98,7 +103,7 @@ struct PackageFixture {
             }
         }
         entries.append(contentsOf: extraFiles.filter { !paths.contains($0.path) })
-        return ModPackageManifest(id: "srmi", version: version, gameID: "starrail",
+        return ModPackageManifest(id: packageID, version: version, gameID: gameID,
             supportedRuntimeBundleIDs: [fixtureRuntime], runnerPath: "hook-runner.exe",
             injectorPath: "3dmloader.dll", payloadPath: "payload/d3d11.dll",
             archiveSize: Int64(archiveData.count), archiveSHA256: archiveSHA256 ?? sha256(archiveData),

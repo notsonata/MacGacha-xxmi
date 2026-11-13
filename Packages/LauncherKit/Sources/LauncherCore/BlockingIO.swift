@@ -14,14 +14,17 @@ public enum BlockingIO {
         try await Task.detached(executorPreference: executor) { try body() }.value
     }
 
+    /// Like `finish`, for uncancelled cleanup that reports a value.
+    package static func finishing<T: Sendable>(_ body: @escaping @Sendable () throws -> T) async throws -> T {
+        try await Task.detached(executorPreference: executor) { try body() }.value
+    }
+
+    /// Keep the caller task so cancellation at an I/O boundary is immediately
+    /// visible without racing cross-task cancellation-handler registration.
     public static func run<T: Sendable>(_ body: @escaping @Sendable () async throws -> T) async throws -> T {
-        try Task.checkCancellation()
-        let worker = Task(executorPreference: executor) {
+        try await withTaskExecutorPreference(executor, isolation: nil) {
             try Task.checkCancellation()
             return try await body()
         }
-        return try await withTaskCancellationHandler {
-            try await worker.value
-        } onCancel: { worker.cancel() }
     }
 }

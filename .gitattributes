@@ -1,6 +1,13 @@
-
 # Pinned upstream patches retain exact whitespace and CRLF bytes for zero-fuzz application.
 compat/xxmi/patches/*.patch -text -whitespace
 
 # Authenticated upstream excerpts must retain verbatim whitespace and line endings.
 scripts/tests/fixtures/** -text -whitespace
+
+# Preserve pinned upstream bytes, including line endings and existing whitespace.
+Packages/LauncherKit/Sources/CHDiffPatch/vendor/** -text -whitespace
+Packages/LauncherKit/Sources/CHDiffPatch/LICENSE -text
+
+# Synthetic upstream-generated decoder fixtures must retain their exact bytes.
+Packages/LauncherKit/Tests/SophonTests/Fixtures/HDiffUpstream/*.bin binary
+Packages/LauncherKit/Tests/SophonTests/Fixtures/HDiffUpstream/*.hdiff binary

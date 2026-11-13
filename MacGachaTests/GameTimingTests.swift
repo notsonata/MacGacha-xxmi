@@ -54,6 +54,21 @@ import Synchronization
         #expect(abs(seconds(try #require(warmed.timing.remaining)) - 70) < 0.01)
     }
 
+    @Test func zeroGrowthEventsBetweenChunksKeepTheEstimate() throws {
+        var progress = GameProgress()
+        var shown: [Duration?] = []
+        // 100 B/s arriving in chunks, with staging and heartbeat events in between.
+        for tick in 0...120 {
+            let time = start.advanced(by: .milliseconds(tick * 250))
+            let downloaded = Int64(tick / 4) * 100
+            if let value = progress.update(at: time, downloaded: downloaded, network: 10_000,
+                staged: Int64(tick), totalStaged: 20_000), tick >= 48 {
+                shown.append(value.timing.remaining)
+            }
+        }
+        #expect(!shown.isEmpty && shown.allSatisfy { $0 != nil })
+    }
+
     @Test func zeroRateUnknownTotalAndHugeEtaAreSafe() throws {
         var progress = GameProgress()
         _ = progress.update(at: start, downloaded: 0, network: Int64.max, staged: 0, totalStaged: 0)
@@ -62,7 +77,9 @@ import Synchronization
         #expect(huge.timing.remaining == GameProgress.maximumRemaining)
         let stopped = progress.update(at: start.advanced(by: .seconds(11)), downloaded: 1,
             network: Int64.max, staged: 0, totalStaged: 0)
-        #expect(stopped?.timing.remaining == nil)
+        #expect(stopped?.timing.remaining == GameProgress.maximumRemaining)
+        let stalled = start.advanced(by: .seconds(41))
+        #expect(stopped?.timing.display(at: stalled) == .slow(elapsed: nil))
         let unknown = progress.update(at: start.advanced(by: .seconds(12)), downloaded: 1,
             network: 0, staged: 30, totalStaged: 0)
         #expect(unknown?.timing.remaining == nil && unknown?.timing.hasFraction == false)
@@ -110,23 +127,23 @@ import Synchronization
         }
     }
 
-    @Test func completedNetworkSwitchesEtaToStagingAndKeepsDownloadFraction() throws {
+    @Test func completedNetworkSwitchesEtaToStagingAndIncludesLocalWork() throws {
         var progress = GameProgress()
         _ = progress.update(at: start, downloaded: 0, network: 1000, staged: 0, totalStaged: 4000)
         _ = progress.update(at: start.advanced(by: .seconds(10)), downloaded: 900,
             network: 1000, staged: 900, totalStaged: 4000)
         let switched = try unwrap(progress.update(at: start.advanced(by: .seconds(11)), downloaded: 1000,
             network: 1000, staged: 1000, totalStaged: 4000))
-        #expect(switched.fraction == 1)
+        #expect(switched.fraction == 0.4)
         #expect(switched.timing.remaining == nil)
         let warming = try unwrap(progress.update(at: start.advanced(by: .seconds(20)), downloaded: 1000,
             network: 1000, staged: 1900, totalStaged: 4000))
         #expect(warming.timing.remaining == nil)
         let warmed = try unwrap(progress.update(at: start.advanced(by: .seconds(21)), downloaded: 1000,
             network: 1000, staged: 2000, totalStaged: 4000))
-        #expect(warmed.fraction == 1)
+        #expect(warmed.fraction == 0.6)
         #expect(abs(seconds(try #require(warmed.timing.remaining)) - 20) < 0.01)
-        #expect(warmed.speed == 0)
+        #expect(warmed.speed == nil)
         #expect(warmed.timing.lastAdvance == start.advanced(by: .seconds(21)))
     }
 

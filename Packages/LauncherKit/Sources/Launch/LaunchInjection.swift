@@ -8,14 +8,41 @@ import RuntimeManager
 /// App-owned preparation for an opt-in compatibility injection. Returning nil
 /// keeps the launch byte-for-byte identical to a normal launch.
 public protocol LaunchInjectionPreparing: Sendable {
+    /// Read-only eligibility check before journal creation or prefix preparation.
+    func validateEligibility(game: GameDefinition, settings: LaunchSettings) async throws
     func prepare(gameID: String, runtimeBundleID: String, backendD3D11: URL) async throws -> LaunchInjectionConfiguration?
+    /// Settings-aware preparation lets providers fail closed for a game whose
+    /// current launch settings cannot be injected, before any snapshot exists.
+    func prepare(game: GameDefinition, runtimeBundleID: String, backendD3D11: URL,
+        settings: LaunchSettings) async throws -> LaunchInjectionConfiguration?
     /// Runs once supervision has verified the session ended. Providers may
     /// harvest runtime-written state; failures retain recovery ownership for retry.
     func finish(configuration: LaunchInjectionConfiguration) async throws
+    /// Removes a snapshot that was prepared but never ran because the launch
+    /// failed before its journal recorded it. Best effort; the startup sweep
+    /// reclaims anything left behind.
+    func discard(configuration: LaunchInjectionConfiguration) async
+    /// Reclaims one game's snapshots that no journal, live or recovery session
+    /// references. The manager holds that game's session lock for the call.
+    func sweepSessions(gameID: String, retaining: [URL]) async
+    /// Explicit, user-requested publication of the current enabled mods into a
+    /// running session's snapshot. The manager has verified the session is the
+    /// journal's active, running, unended one and serializes it with end.
+    func applyLive(configuration: LaunchInjectionConfiguration) async throws
 }
 
 public extension LaunchInjectionPreparing {
+    func validateEligibility(game: GameDefinition, settings: LaunchSettings) async throws {}
+    func prepare(game: GameDefinition, runtimeBundleID: String, backendD3D11: URL,
+        settings: LaunchSettings) async throws -> LaunchInjectionConfiguration? {
+        try await prepare(gameID: game.id, runtimeBundleID: runtimeBundleID, backendD3D11: backendD3D11)
+    }
     func finish(configuration: LaunchInjectionConfiguration) async throws {}
+    func discard(configuration: LaunchInjectionConfiguration) async {}
+    func sweepSessions(gameID: String, retaining: [URL]) async {}
+    func applyLive(configuration: LaunchInjectionConfiguration) async throws {
+        throw LauncherError.io("Live mod updates are unavailable")
+    }
 }
 
 /// Immutable per-launch snapshot produced by the mod-support store. The files
@@ -25,10 +52,19 @@ public struct LaunchInjectionConfiguration: Codable, Equatable, Sendable {
     public let injectorURL: URL
     public let payloadURL: URL
     public let sessionDirectory: URL
+    /// Game/profile identity recorded with the snapshot so recovery never
+    /// applies one game's injection context to another. Older journals omit it.
+    public let gameID: String?
+    public let targetExecutable: String?
 
-    public init(runnerURL: URL, injectorURL: URL, payloadURL: URL, sessionDirectory: URL) {
+    public var resolvedGameID: String { gameID ?? "starrail" }
+    public var resolvedTargetExecutable: String { targetExecutable ?? "StarRail.exe" }
+
+    public init(runnerURL: URL, injectorURL: URL, payloadURL: URL, sessionDirectory: URL,
+        gameID: String? = nil, targetExecutable: String? = nil) {
         self.runnerURL = runnerURL; self.injectorURL = injectorURL; self.payloadURL = payloadURL
-        self.sessionDirectory = sessionDirectory
+        self.sessionDirectory = sessionDirectory; self.gameID = gameID
+        self.targetExecutable = targetExecutable
     }
 
     func validateForJournal() throws {
@@ -38,13 +74,31 @@ public struct LaunchInjectionConfiguration: Codable, Equatable, Sendable {
                 throw LauncherError.journalCorrupt("Invalid injection snapshot path")
             }
         }
+        if let gameID { _ = try SafeIdentifier(gameID) }
+        guard ["StarRail.exe", "ZenlessZoneZero.exe"].contains(resolvedTargetExecutable) else {
+            throw LauncherError.journalCorrupt("Invalid injection target executable")
+        }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case runnerURL, injectorURL, payloadURL, sessionDirectory, gameID, targetExecutable
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        runnerURL = try container.decode(URL.self, forKey: .runnerURL)
+        injectorURL = try container.decode(URL.self, forKey: .injectorURL)
+        payloadURL = try container.decode(URL.self, forKey: .payloadURL)
+        sessionDirectory = try container.decode(URL.self, forKey: .sessionDirectory)
+        gameID = try container.decodeIfPresent(String.self, forKey: .gameID)
+        targetExecutable = try container.decodeIfPresent(String.self, forKey: .targetExecutable)
     }
 }
 
 /// The only compatibility pair established against a live HSR session.
 enum LaunchInjection {
-    static let gameID = "starrail"
     static let runtimeBundleID = "d3dmetal-wine11.20-gptk4.0b3"
+    private static let supportedFamilies: Set<GameFamily> = [.starrail, .zzz]
     private static let backendD3D11Path = "lib/wine/x86_64-windows/d3d11.dll"
 
     static func backendD3D11URL(for bundle: InstalledRuntimeBundle) -> URL {
@@ -52,8 +106,21 @@ enum LaunchInjection {
     }
 
     static func supports(game: GameDefinition, bundle: InstalledRuntimeBundle, settings: LaunchSettings) -> Bool {
-        game.id == gameID && game.region == .global && game.family == .starrail
-            && bundle.id.rawValue == runtimeBundleID && settings.backend == .d3dmetal
+        guard game.region == .global, supportedFamilies.contains(game.family),
+            bundle.id.rawValue == runtimeBundleID, settings.backend == .d3dmetal else { return false }
+        // ZZZ's default renderer is DirectX 12. Injection is only established
+        // for D3D11, so an enabled configuration must fail closed instead of
+        // changing the user's launch settings.
+        return game.family != .zzz || !settings.directX12
+    }
+
+    /// Editions whose snapshots can exist at all, independent of settings.
+    static func mayInject(_ game: GameDefinition) -> Bool {
+        game.region == .global && supportedFamilies.contains(game.family)
+    }
+
+    static func targetExecutable(for family: GameFamily) -> String {
+        family == .zzz ? "ZenlessZoneZero.exe" : "StarRail.exe"
     }
 
     struct Prepared: Sendable {
@@ -69,20 +136,32 @@ enum LaunchInjection {
             guard launch.arguments.contains(expectedGamePath) else {
                 throw LauncherError.io("The resolved launch command is not the expected game executable")
             }
-            var arguments = [windowsRunnerPath, "--loader", windowsInjectorPath, "--payload", windowsPayloadPath, "--"]
+            var arguments = [windowsRunnerPath, "--loader", windowsInjectorPath, "--payload", windowsPayloadPath]
+            // The runner keeps StarRail.exe as its default target; ZZZ must be
+            // explicit so the helper never verifies or injects the wrong image.
+            if configuration.resolvedTargetExecutable != "StarRail.exe" {
+                arguments.append(contentsOf: ["--target-exe", configuration.resolvedTargetExecutable])
+            }
+            arguments.append("--")
             arguments.append(contentsOf: launch.arguments)
             return ResolvedLaunch(executable: launch.executable, arguments: arguments, environment: launch.environment,
                 currentDirectory: launch.currentDirectory, hidden: launch.hidden, copyIfPresent: launch.copyIfPresent,
                 blockedHosts: launch.blockedHosts, preparation: launch.preparation,
                 requiredComponents: launch.requiredComponents, componentCopies: launch.componentCopies,
-                displayFallback: launch.displayFallback)
+                displayFallback: launch.displayFallback, fpsInjector: launch.fpsInjector)
         }
     }
 
     /// Blocking I/O; the launch manager calls this through `BlockingIO.run`.
     static func validate(_ configuration: LaunchInjectionConfiguration, paths: AppPaths, prefix: URL,
-        bundle: InstalledRuntimeBundle) throws -> Prepared {
+        bundle: InstalledRuntimeBundle, game: GameDefinition? = nil) throws -> Prepared {
         try configuration.validateForJournal()
+        if let game {
+            guard configuration.resolvedGameID == game.id,
+                configuration.resolvedTargetExecutable == targetExecutable(for: game.family) else {
+                throw LauncherError.io("The injection snapshot does not match this game")
+            }
+        }
         let sessionDirectory = configuration.sessionDirectory.standardizedFileURL
         let sessionComponents = try relativeComponents(of: sessionDirectory, under: paths.root)
         guard sessionComponents.count >= 3, Array(sessionComponents.prefix(2)) == ["XXMI", "Sessions"] else {
@@ -102,7 +181,8 @@ enum LaunchInjection {
         try verifyBackend(bundle: bundle, paths: paths)
         try verifyRootDrive(paths: paths, prefix: prefix)
         return Prepared(configuration: LaunchInjectionConfiguration(runnerURL: runner, injectorURL: injector,
-            payloadURL: payload, sessionDirectory: sessionDirectory),
+            payloadURL: payload, sessionDirectory: sessionDirectory, gameID: configuration.gameID,
+            targetExecutable: configuration.targetExecutable),
             windowsRunnerPath: WinePath.windowsPath(for: runner),
             windowsInjectorPath: WinePath.windowsPath(for: injector),
             windowsPayloadPath: WinePath.windowsPath(for: payload))

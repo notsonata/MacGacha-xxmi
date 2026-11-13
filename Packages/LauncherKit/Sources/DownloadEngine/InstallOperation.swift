@@ -18,6 +18,9 @@ public struct InstallOperation: Sendable {
     private let pipeline: PipelineConfiguration
     private let mode: Mode
     private let crashHooks: CrashHooks
+    private let patchApplier: (any WholeFilePatchApplier)?
+    private let objectCache: (any InstallObjectCache)?
+    private let log: EventLog?
     private let writesCompletionReceipt: Bool
     private let requireRequestedPlan: Bool
 
@@ -26,13 +29,13 @@ public struct InstallOperation: Sendable {
         fileOps: any FileOps = SystemFileOps(), crashHooks: CrashHooks = .none,
         writesCompletionReceipt: Bool = false, requireRequestedPlan: Bool = false,
         expectedRootIdentity: FileSystemIdentity? = nil, identityProvider: any FileSystemIdentityProvider = SystemFileSystemIdentityProvider(),
-        maxConcurrentObjects: Int = SpaceBudget.defaultMaxConcurrentObjects, pipeline: PipelineConfiguration = .default) throws {
+        maxConcurrentObjects: Int = SpaceBudget.defaultMaxConcurrentObjects, pipeline: PipelineConfiguration = .default, patchApplier: (any WholeFilePatchApplier)? = nil, log: EventLog? = nil, objectCache: (any InstallObjectCache)? = nil) throws {
         try pipeline.validate()
         guard maxConcurrentObjects > 0 else { throw LauncherError.io("Invalid object concurrency limit") }
         self.maxConcurrentObjects = maxConcurrentObjects; self.pipeline = pipeline
         try plan.validate(supportedCodecs: ChunkCodec.supportedCodecs)
         self.plan = plan; fs = try ContainedFileSystem(root: installRoot, fileOps: fileOps, expectedRootIdentity: expectedRootIdentity, identityProvider: identityProvider)
-        self.fetcher = fetcher; self.disk = disk; self.mode = mode; self.crashHooks = crashHooks
+        self.fetcher = fetcher; self.disk = disk; self.mode = mode; self.crashHooks = crashHooks; self.patchApplier = patchApplier; self.log = log; self.objectCache = objectCache
         self.writesCompletionReceipt = writesCompletionReceipt
         self.requireRequestedPlan = requireRequestedPlan
     }
@@ -45,7 +48,7 @@ public struct InstallOperation: Sendable {
     /// workers join, even if the caller discards its iterator between events.
     package func run(retaining owner: (any Sendable)?) -> AsyncThrowingStream<OperationEvent, any Error> {
         let session = CommitSession(requested: plan, fs: fs, fetcher: fetcher, disk: disk, mode: mode, crashHooks: crashHooks,
-            writesCompletionReceipt: writesCompletionReceipt, requireRequestedPlan: requireRequestedPlan, maxConcurrentObjects: maxConcurrentObjects, pipeline: pipeline, retainedOwner: owner)
+            writesCompletionReceipt: writesCompletionReceipt, requireRequestedPlan: requireRequestedPlan, maxConcurrentObjects: maxConcurrentObjects, pipeline: pipeline, retainedOwner: owner, patchApplier: patchApplier, log: log, objectCache: objectCache)
         return AsyncThrowingStream(unfolding: { try await session.next() })
     }
 }
@@ -84,6 +87,9 @@ private actor CommitSession {
     private let retainedOwner: (any Sendable)?
     private let mode: InstallOperation.Mode
     private let crashHooks: CrashHooks
+    private let patchApplier: (any WholeFilePatchApplier)?
+    private let objectCache: (any InstallObjectCache)?
+    private let log: EventLog?
     private let writesCompletionReceipt: Bool
     private let requireRequestedPlan: Bool
     private var lock: InstallLock?
@@ -96,6 +102,7 @@ private actor CommitSession {
     private var batchingPrepared = false
     private var recoveringCommit = false
     private var operationStager: OperationStager?
+    private let verifiedContainers = VerifiedContainers()
     private var batchIndex = 0
     private var staging: AsyncThrowingStream<OperationEvent, any Error>.Iterator?
     private var step = Step.start
@@ -105,8 +112,8 @@ private actor CommitSession {
 
     init(requested: InstallPlan, fs: ContainedFileSystem, fetcher: ChunkFetcher,
         disk: any DiskSpaceProbe, mode: InstallOperation.Mode, crashHooks: CrashHooks, writesCompletionReceipt: Bool,
-        requireRequestedPlan: Bool, maxConcurrentObjects: Int, pipeline: PipelineConfiguration, retainedOwner: (any Sendable)?) {
-        self.requested = requested; self.fs = fs; self.fetcher = fetcher; self.disk = disk; self.mode = mode; self.crashHooks = crashHooks
+        requireRequestedPlan: Bool, maxConcurrentObjects: Int, pipeline: PipelineConfiguration, retainedOwner: (any Sendable)?, patchApplier: (any WholeFilePatchApplier)?, log: EventLog?, objectCache: (any InstallObjectCache)?) {
+        self.requested = requested; self.fs = fs; self.fetcher = fetcher; self.disk = disk; self.mode = mode; self.crashHooks = crashHooks; self.patchApplier = patchApplier; self.log = log; self.objectCache = objectCache
         self.writesCompletionReceipt = writesCompletionReceipt
         self.requireRequestedPlan = requireRequestedPlan
         self.maxConcurrentObjects = maxConcurrentObjects; self.pipeline = pipeline; self.retainedOwner = retainedOwner
@@ -326,12 +333,26 @@ private actor CommitSession {
             // A crash/cancellation may follow fileStaged but precede part
             // cleanup. Reclaim consumed parts before the engine preflight,
             // rather than waiting until Stager has already accepted space.
-            let outstanding = Set(plan.files.filter {
+            var outstanding = Set(plan.files.filter {
                 !state.stagedFiles.contains($0.path) && !state.committedFiles.contains($0.path)
             }.flatMap { SpaceBudget.references($0) })
+            outstanding.formUnion(plan.files.filter { !state.committedFiles.contains($0.path) }.compactMap { $0.recipe?.containerID })
             for (id, object) in plan.objects where !outstanding.contains(id) {
                 let part = try paths.object(object)
                 if try fs.size(at: part) != nil { try fs.removeFile(at: part) }
+            }
+            if let objectCache {
+                let ids = Set(plan.files.filter { !state.committedFiles.contains($0.path) && !state.stagedFiles.contains($0.path) }.compactMap { $0.recipe?.containerID })
+                for id in ids.sorted() {
+                    try Task.checkCancellation()
+                    let object = plan.objects[id]!, destination = try paths.object(object)
+                    if state.verifiedObjects.contains(id), try fs.size(at: destination) == object.transferSize { continue }
+                    if try await objectCache.adopt(object, to: destination, fs: fs) {
+                        try await record(.objectVerified(id: id))
+                        crashHooks.reach(.afterObjectVerified)
+                        verifiedContainers.insert(destination, digest: object.decodedDigest)
+                    }
+                }
             }
             let pending = try pendingPlan()
             if pending.files.isEmpty {
@@ -344,16 +365,20 @@ private actor CommitSession {
             }
             let available = try fs.availableBytes(using: disk)
             let required = try SpaceBudget.required(plan: pending, state: state, fs: fs, maxConcurrentObjects: maxConcurrentObjects, pipeline: pipeline).disk
-            if required <= available { plannedBatches = [pending.files] }
+            let patchUpdate = plan.files.contains { $0.recipe != nil }
+            if !patchUpdate, required <= available { plannedBatches = [pending.files] }
             else {
-                plannedBatches = try partitionAll(pending, available: available)
-                if state.commitStartedBatches.isEmpty, mode != .batched(approved: true) {
+                // Keep independent patch batches even when the whole update
+                // fits. Pass the saved plan so resume retains this policy after
+                // the last recipe file commits, leaving chunk-route files.
+                plannedBatches = try partitionAll(patchUpdate ? plan : pending, available: available)
+                if required > available, state.commitStartedBatches.isEmpty, mode != .batched(approved: true) {
                     pendingError = .insufficientSpace(required: required, available: available)
                     return .needsBatchApproval(required: required, available: available)
                 }
             }
             operationStager = try Stager(plan: plan, fs: fs, fetcher: fetcher,
-                journal: context().journal, disk: disk, maxConcurrentObjects: maxConcurrentObjects, crashHooks: crashHooks, pipeline: pipeline).forOperation()
+                journal: context().journal, disk: disk, maxConcurrentObjects: maxConcurrentObjects, crashHooks: crashHooks, pipeline: pipeline, patchApplier: patchApplier, log: log).sharingVerifiedContainers(verifiedContainers).forOperation()
             let previous = max(state.currentBatch ?? -1, state.commitStartedBatches.max() ?? -1)
             guard previous < Int.max else { throw LauncherError.journalCorrupt("Batch index overflow") }
             nextCommitIndex = previous + 1
@@ -394,6 +419,16 @@ private actor CommitSession {
             selected == (try await context().journal.stagedForCommit()) else {
             throw LauncherError.journalCorrupt("Staged batch membership mismatch")
         }
+        // Staging and all transfers have drained. Flush every verified output
+        // before the existing journal F_FULLFSYNC boundaries and any rename.
+        // Keeping these fsyncs out of concurrent assembly avoids volume-wide
+        // write stalls pinning the journal and the network pipeline together.
+        let fs = fs, plan = try context().plan, files = batch
+        try await BlockingIO.run {
+            for file in files {
+                try fs.synchronizeFile(at: StagingLayout(id: plan.id).file(file.path), durable: false)
+            }
+        }
         try await record(.batchStarted(index: batchIndex))
         try ensureMarker(context().plan.id)
         try await record(.commitStarted(batch: batchIndex))
@@ -430,7 +465,7 @@ private actor CommitSession {
                 try fs.fullSync(at: file.path)
             } else {
                 try await record(.fileUnstaged(path: file.path))
-                let stager = try Stager(plan: plan, fs: fs, fetcher: fetcher, journal: context().journal, disk: disk, maxConcurrentObjects: maxConcurrentObjects, crashHooks: crashHooks, pipeline: pipeline).forRecovery()
+                let stager = try Stager(plan: plan, fs: fs, fetcher: fetcher, journal: context().journal, disk: disk, maxConcurrentObjects: maxConcurrentObjects, crashHooks: crashHooks, pipeline: pipeline, patchApplier: patchApplier, log: log).sharingVerifiedContainers(verifiedContainers).forRecovery()
                 let recovery = try stager.forOperation()
                 for try await _ in recovery.stage(files: [file], holding: lock, retaining: retainedOwner) {}
                 try await refresh()
@@ -477,14 +512,7 @@ private actor CommitSession {
         try cleanupInstallStaging(planID: plan.id, fs: fs)
     }
 
-    private func references(_ file: FileTask) -> Set<String> {
-        var ids = Set<String>()
-        for extent in file.extents {
-            if case .chunk(let id) = extent.source { ids.insert(id) }
-            if let id = extent.fallbackChunkID { ids.insert(id) }
-        }
-        return ids
-    }
+    private func references(_ file: FileTask) -> Set<String> { SpaceBudget.references(file) }
 
     private func sum(_ a: Int64, _ b: Int64) throws -> Int64 {
         let (value, overflow) = a.addingReportingOverflow(b)

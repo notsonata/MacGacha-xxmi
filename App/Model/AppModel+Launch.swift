@@ -18,9 +18,11 @@ import RuntimeManager
     func saveLaunchSettings(_ settings: LaunchSettings, for id: String) throws {
         guard languageRestart == nil else { throw LauncherError.busy("Application language restart is in progress") }
         guard GameDefinition.all.contains(where: { $0.id == id }) else { throw LauncherError.io("Invalid launch settings") }
+        if GenshinFps.applies(to: id), settings.unlockFPS, !genshinFpsRiskAcknowledged { throw LauncherError.genshinFpsRiskNotAcknowledged }
         try settings.validate(for: id)
         let revision = UUID(), preferences = launchPreferences
         launchSettingsRevision = revision; launchSettingsRevisions[id] = revision; launchSettingsCache[id] = settings
+        refreshDependencyConsentGames()
         enqueueSettingsWrite(key: id) {
             try preferences.save(settings, game: id)
         } didCommit: { [weak self] in self?.durableLaunchSettings[id] = settings } rollback: { [weak self] in
@@ -31,19 +33,26 @@ import RuntimeManager
 
     var sessionLogsEnabled: Bool {
         get { globalLaunchSettings.sessionLogsEnabled }
-        set {
-            // No settings writes may enter behind the restart's final flush.
-            guard languageRestart == nil else { show(LauncherError.busy("Application language restart is in progress")); return }
-            let preferences = launchPreferences
-            globalLaunchSettings.sessionLogsEnabled = newValue
-            let settings = globalLaunchSettings, revision = UUID()
-            launchSettingsRevision = revision; launchSettingsRevisions["global"] = revision
-            enqueueSettingsWrite(key: "global") { try preferences.saveGlobal(settings) } didCommit: { [weak self] in
-                self?.durableGlobalLaunchSettings = settings
-            } rollback: { [weak self] in
-                guard let self, self.launchSettingsRevisions["global"] == revision else { return }
-                self.globalLaunchSettings = self.durableGlobalLaunchSettings
-            }
+        set { setGlobalLaunchPreference(\.sessionLogsEnabled, to: newValue) }
+    }
+
+    var gameModeEnabled: Bool {
+        get { globalLaunchSettings.gameModeEnabled }
+        set { setGlobalLaunchPreference(\.gameModeEnabled, to: newValue) }
+    }
+
+    func setGlobalLaunchPreference(_ key: WritableKeyPath<GlobalLaunchSettings, Bool>, to value: Bool) {
+        // No settings writes may enter behind the restart's final flush.
+        guard languageRestart == nil else { show(LauncherError.busy("Application language restart is in progress")); return }
+        let preferences = launchPreferences
+        globalLaunchSettings[keyPath: key] = value
+        let settings = globalLaunchSettings, revision = UUID()
+        launchSettingsRevision = revision; launchSettingsRevisions["global"] = revision
+        enqueueSettingsWrite(key: "global") { try preferences.saveGlobal(settings) } didCommit: { [weak self] in
+            self?.durableGlobalLaunchSettings = settings
+        } rollback: { [weak self] in
+            guard let self, self.launchSettingsRevisions["global"] == revision else { return }
+            self.globalLaunchSettings = self.durableGlobalLaunchSettings
         }
     }
 
@@ -103,9 +112,11 @@ import RuntimeManager
 
     func play(_ id: String) {
         guard canBeginGameOrRuntimeOperation() else { return }
-        guard launchSlotOwner == nil, launchTasks.isEmpty, gameOperation?.id != id,
+        guard !runtimeCatalogUnavailable, runtimeCatalogMutationID == nil, launchSlotOwner == nil, launchTasks.isEmpty,
+            (gameOperation?.id != id || (gameOperation?.isPreDownload == true && gameOperation?.isUninstall == false)),
             let game = GameDefinition.all.first(where: { $0.id == id }) else { return }
         if case .recoveryNeeded = launchStates[id] { return }
+        let preDownload = gameOperation.flatMap { $0.id == id && $0.isPreDownload ? $0 : nil }
         // Reserve before any await, and assume potentially live before spawning.
         // A post-spawn journal write may suspend before the .watch event arrives.
         launchSlotOwner = id; liveLaunchGames.insert(id)
@@ -121,6 +132,7 @@ import RuntimeManager
                 if self.launchTaskGenerations[id] == generation { self.launchTasks[id] = nil; self.launchTaskGenerations[id] = nil }
             }
             do {
+                if let preDownload { _ = try await self.stopPreDownloadOperation(preDownload) }
                 await self.reattachOnStart()
                 if let error = self.launchStartupError { throw error }
                 await self.refreshRosetta()

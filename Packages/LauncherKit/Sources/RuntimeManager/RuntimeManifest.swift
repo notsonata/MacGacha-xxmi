@@ -4,11 +4,17 @@ import Foundation
 import LauncherCore
 
 public enum ComponentKind: String, Codable, Sendable, CaseIterable {
-    case wine, dxmt, d3dmetal, jadeite, steamShim, crypt32Fix
+    case wine, dxmt, d3dmetal, jadeite, steamShim, crypt32Fix, surroundAudio, genshinFps
 
     /// Component IDs use release-facing names; store directories use the Codable kind.
     public var idPrefix: String {
-        switch self { case .steamShim: "steam-shim"; case .crypt32Fix: "crypt32-fix"; default: rawValue }
+        switch self {
+        case .steamShim: "steam-shim"
+        case .crypt32Fix: "crypt32-fix"
+        case .surroundAudio: "surround-audio"
+        case .genshinFps: "genshin-fps-unlock"
+        default: rawValue
+        }
     }
 }
 
@@ -76,6 +82,10 @@ public struct RuntimeComponent: Codable, Sendable, Identifiable {
         if let url { try validateRuntimeURL(url) }
         guard size.map({ $0 >= 0 }) ?? true, installedSize.map({ $0 >= 0 }) ?? true else {
             throw LauncherError.io("Runtime sizes must be nonnegative")
+        }
+        guard size.map({ $0 <= 16 << 30 }) ?? true,
+            installedSize.map({ $0 <= 64 << 30 }) ?? true else {
+            throw LauncherError.io("Runtime sizes exceed supported bounds")
         }
         guard sha256.map({ $0.algorithm == .sha256 }) ?? true else {
             throw LauncherError.io("Runtime digest must use SHA-256")

@@ -23,6 +23,23 @@ public enum ModUserSettingsOutcome: Sendable, Equatable {
     case unchanged
     case superseded
     case notPrepared
+    /// The session directory is already gone: an earlier finish harvested and
+    /// reclaimed it, so repeating finish after a failed checkpoint is safe.
+    case alreadyFinished
+}
+
+/// Result of reclaiming launch sessions no journal, live session or recovery
+/// still references.
+public struct ModSessionSweepReport: Sendable, Equatable {
+    public let reclaimed: Int
+    public let failed: Int
+    public init(reclaimed: Int, failed: Int) { self.reclaimed = reclaimed; self.failed = failed }
+}
+
+/// Result of publishing the enabled library into a running launch session.
+public struct ModLiveApplyResult: Sendable, Equatable {
+    public let enabledMods: Int
+    public init(enabledMods: Int) { self.enabledMods = enabledMods }
 }
 
 public struct ManagedMod: Identifiable, Sendable, Equatable {

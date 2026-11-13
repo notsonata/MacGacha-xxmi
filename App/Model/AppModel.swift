@@ -11,6 +11,58 @@ import HoYoPlayAPI
 import GameLibrary
 import ModSupport
 
+/// Dependencies are grouped by what they do for a game, not by how they ship.
+enum RuntimeCategory: String, CaseIterable, Sendable {
+    case runtimes, compatibility, extras
+}
+
+/// One dependency (a runtime bundle or a helper) with every version the catalog
+/// or the disk knows about, in catalog order, so rollback stays one click away.
+@MainActor struct RuntimeVersionGroup: Identifiable {
+    enum Status: Equatable {
+        case working(RuntimeRow)
+        case failed(RuntimeRow, message: String)
+        case notInstalled(RuntimeRow)
+        case updateAvailable(active: RuntimeRow, recommended: RuntimeRow)
+        case ready(RuntimeRow)
+        case damaged
+    }
+
+    let id: String
+    let category: RuntimeCategory
+    var rows: [RuntimeRow]
+
+    static func group(_ rows: [RuntimeRow]) -> [Self] {
+        var groups: [Self] = []
+        for row in rows {
+            if let index = groups.firstIndex(where: { $0.id == row.familyID }) {
+                groups[index].rows.append(row)
+            } else {
+                groups.append(Self(id: row.familyID, category: row.category, rows: [row]))
+            }
+        }
+        return groups
+    }
+
+    /// The version games use: the catalog selection, or without a catalog the installed one.
+    func active(selected: (String) -> Bool, hasCatalog: Bool) -> RuntimeRow? {
+        rows.first { selected($0.id) } ?? (hasCatalog ? nil : rows.first { if case .installed = $0.state { true } else { false } })
+    }
+
+    func status(selected: (String) -> Bool, recommended: (String) -> Bool, hasCatalog: Bool) -> Status {
+        if let row = rows.first(where: { if case .working = $0.state { true } else { false } }) { return .working(row) }
+        let active = active(selected: selected, hasCatalog: hasCatalog)
+        let target = active ?? rows.first { recommended($0.id) } ?? rows.first { if case .invalid = $0.state { false } else { true } }
+        guard let target else { return .damaged }
+        if case .failed(let message) = target.state { return .failed(target, message: message) }
+        guard let active, case .installed = active.state else { return .notInstalled(target) }
+        if let newer = rows.first(where: { recommended($0.id) }), newer.id != active.id {
+            return .updateAvailable(active: active, recommended: newer)
+        }
+        return .ready(active)
+    }
+}
+
 @MainActor @Observable
 final class AppModel {
     enum ConsentMode: Sendable, Equatable { case download, importGPTK }
@@ -40,6 +92,23 @@ final class AppModel {
         /// Optional bundle summary and download size for bundles or standalone components.
         var summary: String? = nil
         var downloadSize: Int64? = nil
+        var componentKind: ComponentKind? = nil
+        var backend: RuntimeBackend? = nil
+        /// The raw version of a bundle's own Wine component, for the build number shown in Dependencies.
+        var wineVersion: String? = nil
+
+        var category: RuntimeCategory {
+            if backend != nil { return .runtimes }
+            switch componentKind {
+            case .wine, .dxmt, .d3dmetal: return .runtimes
+            case .jadeite, .steamShim, .crypt32Fix: return .compatibility
+            default: return .extras
+            }
+        }
+        var familyID: String {
+            if let backend { return "bundle-" + backend.rawValue }
+            return "component-" + (componentKind?.rawValue ?? "unknown")
+        }
     }
 
     var region: Region {
@@ -53,6 +122,10 @@ final class AppModel {
     }
     private(set) var games: [String: GameState] = Dictionary(uniqueKeysWithValues: GameDefinition.all.map { ($0.id, GameState(status: .unknown)) })
     private(set) var gameRecords: [String: GameRecord] = [:]
+    var preDownloads: [String: PreDownloadOverlay] = [:]
+    @ObservationIgnored var preDownloadRevisions: [String: UUID] = [:]
+    var gameUpdateCheck: [String: GameUpdateCheckResult] = [:]
+    @ObservationIgnored var gameUpdateCheckTasks: [String: Task<Void, Never>] = [:]
     var isGameOperationRunning: Bool { gameOperation != nil }
     private(set) var isRuntimeOperationRunning = false
     @ObservationIgnored let updater: any AppUpdating
@@ -90,16 +163,39 @@ final class AppModel {
     private(set) var installRoot: URL
 
     @ObservationIgnored let paths: AppPaths
+    /// The original Star Rail store; launch and HSR compatibility code keep
+    /// using it directly.
     @ObservationIgnored let modSupportStore: ModSupportStore
-    var modSupportSnapshot: ModSupportSnapshot?
-    var modSupportViewState: ModSupportViewState = .loading
-    var modSupportActivity: ModSupportActivity?
-    var modSupportPackage: BundledXXMIPackage?
-    var modSupportError: String?
-    @ObservationIgnored var modSupportTask: Task<Void, Never>?
+    @ObservationIgnored let modSupportStores: [String: ModSupportStore]
+    /// Per-game state: each supported profile has independent package, settings,
+    /// snapshot and activity. The computed accessors below default to HSR.
+    var modSupportSnapshots: [String: ModSupportSnapshot] = [:]
+    var modSupportViewStates: [String: ModSupportViewState] = [:]
+    var modSupportActivities: [String: ModSupportActivity] = [:]
+    var modSupportPackages: [String: BundledXXMIPackage] = [:]
+    var modSupportErrors: [String: String] = [:]
+    /// Games whose current running session was launched with injection, so an
+    /// explicit live mod update may be offered.
+    var modLiveApplyEligibility: [String: Bool] = [:]
+    /// Games whose last explicit live update succeeded; the panel asks the
+    /// player to reload mods in game.
+    var modLiveApplyPrompts: Set<String> = []
+    @ObservationIgnored var modSupportTasks: [String: Task<Void, Never>] = [:]
     // Observed: the setup sheet can open before startup loads it and must refresh when it arrives.
     var manifest: RuntimeManifest?
-    @ObservationIgnored private let services: any RuntimeServices
+    var runtimeCatalog: RuntimeCatalogSnapshot?
+    var runtimeCatalogUnavailable = false
+    var runtimeCatalogRefreshing = false
+    var runtimeCatalogMutationID: String?
+    @ObservationIgnored let catalogAccess: (any RuntimeCatalogAccess)?
+    @ObservationIgnored var catalogRefreshTask: Task<Void, Never>?
+    @ObservationIgnored var catalogMutationTask: Task<Void, Never>?
+    @ObservationIgnored var catalogSelectionGeneration = UUID()
+    @ObservationIgnored var cancelledCatalogSetups: Set<String> = []
+    @ObservationIgnored var catalogActivationTargets: [String: RuntimeCatalogSnapshot] = [:]
+    @ObservationIgnored var automaticCatalogSetupKeys: Set<String> = []
+    @ObservationIgnored var runtimeInstallContexts: [String: RuntimeInstallContext] = [:]
+    @ObservationIgnored let services: any RuntimeServices
     @ObservationIgnored let artServices: [Region: any GameArtProviding]
     @ObservationIgnored var artHydrationTasks: [Region: Task<Void, Never>] = [:]
     @ObservationIgnored var artTasks: [Region: Task<Void, Never>] = [:]
@@ -164,6 +260,17 @@ final class AppModel {
     #if DEBUG
     var debugLaunchRuntimesReady = false
     #endif
+    // TODO(auto-update): inert placeholders behind `AppModel+AutoUpdateUI.swift`.
+    var dependencyAutoUpdates: [String: DependencyAutoUpdateState] = [:]
+    var runtimeUpdatesAwaitingConsent: Set<String> = []
+    var dependencyAutoUpdateReservation = false
+    var dependencyHasRetainedVersions = false
+    @ObservationIgnored var dependencyAutoUpdateTask: Task<Void, Never>?
+    @ObservationIgnored var dependencyAutoUpdateGeneration = UUID()
+    @ObservationIgnored var dependencyAutoUpdateSuppressed: Set<String> = []
+    @ObservationIgnored var dependencyConsentTargets: [RuntimeBackend: RuntimeAutomaticUpdate] = [:]
+    @ObservationIgnored var dependencyWorking: [String: RowState] = [:]
+    @ObservationIgnored var dependencyUpdateLog: EventLog?
     var launchSettingsRevisions: [String: UUID] = [:]
     var launchStates: [String: LaunchUIState] = [:]
     var launchNotes: [String: LaunchNote] = [:]
@@ -200,7 +307,7 @@ final class AppModel {
 
 
     init(paths: AppPaths = .standard(), manifest: RuntimeManifest? = nil,
-        services: (any RuntimeServices)? = nil, defaults: UserDefaults? = .standard,
+        services: (any RuntimeServices)? = nil, catalogAccess: (any RuntimeCatalogAccess)? = nil, defaults: UserDefaults? = .standard,
         artService: any GameArtProviding = EmptyGameArtProvider(),
         artServices: [Region: any GameArtProviding] = [:],
         eventsServices: [Region: any GameEventsProviding] = [:],
@@ -216,6 +323,7 @@ final class AppModel {
         purgeable: any PurgeableSpaceProbe = SystemPurgeableSpaceProbe(),
         launchServices: any LaunchServices = PreviewLaunchServices(),
         modSupportStore: ModSupportStore? = nil,
+        modSupportStores: [String: ModSupportStore]? = nil,
         launchPreferences: (any LaunchPreferencesPersistence)? = nil,
         launchWindows: LaunchWindowCoordinator = LaunchWindowCoordinator(),
         launchSleep: @escaping @Sendable () async throws -> Void = { try await ContinuousClock().sleep(for: .milliseconds(500)) },
@@ -241,8 +349,14 @@ final class AppModel {
         self.rosettaPollInterval = rosettaPollInterval; self.rosettaPollTimeout = rosettaPollTimeout; self.rosettaPrompt = rosettaPrompt
         self.recoverySleep = recoverySleep
         self.launchServices = launchServices; self.launchWindows = launchWindows; self.launchSleep = launchSleep
+        self.catalogAccess = catalogAccess
         self.paths = paths; self.manifest = manifest; self.gameServices = gameServices; self.purgeableSpace = purgeable
-        self.modSupportStore = modSupportStore ?? ModSupportStore(paths: paths)
+        let starRailStore = modSupportStore ?? ModSupportStore(paths: paths, profile: .starRail)
+        self.modSupportStore = starRailStore
+        self.modSupportStores = modSupportStores ?? [
+            ModSupportProfile.starRail.gameID: starRailStore,
+            ModSupportProfile.zzz.gameID: ModSupportStore(paths: paths, profile: .zzz),
+        ]
         self.services = services ?? LiveRuntimeServices(paths: paths)
         self.defaults = defaults; self.now = now
         let preferred = Self.persistedRegion(defaults: defaults, locale: locale)
@@ -266,10 +380,15 @@ final class AppModel {
     }
 
     func setGameState(_ id: String, _ state: GameState) {
+        // A status application or operation transition supersedes a manual
+        // check, including one still waiting for its remote response.
+        gameUpdateCheck[id] = nil
         var state = state
         if case .working(let phase, let fraction, _, _, _) = state.activity {
-            if case .working(let previous, _, _, _, _) = games[id]?.activity, previous != phase { state.timing = nil }
-            if state.timing == nil, case .working(let previous, _, _, _, _) = games[id]?.activity, previous == phase {
+            if case .working(let previous, _, _, _, _) = games[id]?.activity,
+                GameProgress.trackingPhase(for: previous) != GameProgress.trackingPhase(for: phase) { state.timing = nil }
+            if state.timing == nil, case .working(let previous, _, _, _, _) = games[id]?.activity,
+                GameProgress.trackingPhase(for: previous) == GameProgress.trackingPhase(for: phase) {
                 state.timing = games[id]?.timing
             }
             let time = now()
@@ -326,8 +445,14 @@ final class AppModel {
         let log = EventLog(directory: paths.logs)
         let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
             ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Caches")
-        let modSupport = ModSupportStore(paths: paths)
-        let launch = LiveLaunchServices(paths: paths, log: log, modSupportStore: modSupport)
+        let modSupport = ModSupportStore(paths: paths, profile: .starRail)
+        let modSupportZZZ = ModSupportStore(paths: paths, profile: .zzz)
+        let modSupportStores = [ModSupportProfile.starRail.gameID: modSupport,
+            ModSupportProfile.zzz.gameID: modSupportZZZ]
+        let runtimeServices = LiveRuntimeServices(paths: paths, log: log)
+        let catalog = LiveRuntimeCatalogAccess(paths: paths, services: runtimeServices)
+        let launch = LiveLaunchServices(paths: paths, log: log, modSupportStores: modSupportStores, icons: CachedGameModeIcons(
+            cacheDirectory: gameArtCacheDirectory(in: caches, bundleIdentifier: Bundle.main.bundleIdentifier)), catalog: catalog)
         let art: [Region: any GameArtProviding] = Dictionary(uniqueKeysWithValues: Region.allCases.map {
             ($0, GameArtService(cacheDirectory: gameArtCacheDirectory(in: caches,
                 bundleIdentifier: Bundle.main.bundleIdentifier), region: $0,
@@ -339,10 +464,11 @@ final class AppModel {
                 .appendingPathComponent("GameEvents", isDirectory: true), region: $0,
                 language: HoYoPlayLanguage.content(forInterface: InterfaceLanguageSettings.runningLocalization)))
         })
-        return AppModel(paths: paths, services: LiveRuntimeServices(paths: paths, log: log),
+        return AppModel(paths: paths, services: runtimeServices, catalogAccess: catalog,
             artServices: art, eventsServices: events, gameServices: LiveGameServices(paths: paths, log: log, guard: launch),
             rosettaProbe: SystemRosettaProbe(), displayProbe: SystemDisplayProbe(),
-            displayNames: { ScreenDisplayNames.current() }, launchServices: launch, modSupportStore: modSupport, updater: SparkleUpdaterService(), relaunch: { arguments in
+            displayNames: { ScreenDisplayNames.current() }, launchServices: launch, modSupportStore: modSupport,
+            modSupportStores: modSupportStores, updater: SparkleUpdaterService(), relaunch: { arguments in
                 let configuration = NSWorkspace.OpenConfiguration()
                 configuration.createsNewApplicationInstance = true; configuration.arguments = arguments
                 _ = try await NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: configuration)
@@ -376,6 +502,7 @@ final class AppModel {
     }
 
     deinit {
+        catalogRefreshTask?.cancel(); catalogMutationTask?.cancel(); dependencyAutoUpdateTask?.cancel()
         rosettaRefreshTask?.cancel(); rosettaPollTask?.cancel(); rosettaInstallTask?.cancel()
         for check in runtimeSetupRosettaChecks.values { check.task.cancel() }
         for task in tasks.values { task.cancel() }
@@ -391,7 +518,7 @@ final class AppModel {
         for task in eventsTasks.values { task.cancel() }
         eventsHydrationTask?.cancel(); eventsExpiryTask?.cancel(); eventsWindowTask?.cancel()
         gameTask?.cancel(); gameStartupTask?.cancel(); gameActivationTask?.cancel()
-        modSupportTask?.cancel()
+        for task in modSupportTasks.values { task.cancel() }
     }
 
     func start() async {
@@ -400,32 +527,36 @@ final class AppModel {
         if defaults?.data(forKey: LanguageRestartContinuation.defaultsKey) != nil { setLanguageRestart(UUID()) }
         startArtStartup()
         let eventsHydration = hydrateGameEvents()
-        defer { isStarting = false }
+        defer { isStarting = false; scheduleDependencyAutoUpdates() }
         refreshConnectedDisplays()
         await ensureGameStartup().value
         await continueLanguageRestart(arguments: launchArguments)
         await refreshRosetta()
         do {
-            if manifest == nil { manifest = try await BundledRuntimeManifest.load() }
+            if let catalogAccess { applyRuntimeCatalog(try await catalogAccess.snapshot()) }
+            else if manifest == nil { manifest = try await BundledRuntimeManifest.load() }
             do { try await services.sweepStaging() }
             catch LauncherError.busy {
                 // Recovery defers mutation, but installed runtimes remain
                 // inspectable and must not appear available for replacement.
             }
             try await scanAndApply()
+            try? await refreshAutomaticRetention()
             await refreshLogs()
         } catch { show(error) }
         await refreshGames()
         await eventsHydration.value
+        scheduleRuntimeCatalogRefresh()
         updater.start { [weak self] in self?.isBusyForUpdates ?? true }
     }
 
     func refreshRuntimes() async {
+        if catalogAccess != nil { await refreshRuntimeCatalog(force: true) }
         do { try await scanAndApply() }
         catch { show(error) }
     }
 
-    private func scanAndApply() async throws {
+    func scanAndApply() async throws {
         let generation = UUID(); scanGeneration = generation
         let consentRevision = runtimeConsentRevision
         let scan = try await services.scan()
@@ -443,25 +574,61 @@ final class AppModel {
     }
 
     func install(_ id: String) { request(id, mode: .download) }
-    func importGPTK(_ id: String) { request(id, mode: .importGPTK) }
+    func importGPTK(_ id: String) {
+        if catalogAccess != nil, !runtimeIsSelected(id) {
+            if let task = dependencyAutoUpdateTask {
+                task.cancel(); Task { [weak self] in await task.value; self?.importGPTK(id) }; return
+            }
+            guard canChangeRuntimeCatalog else { return }
+            do {
+                let target = try runtimeVersionTarget(id, pinned: false)
+                captureRuntimeInstallContext(id, manifest: target.catalog.manifest)
+                guard let context = runtimeInstallContexts[id], context.component.kind == .d3dmetal else { return }
+                let key = "catalog-" + id
+                runtimeCatalogMutationID = id; catalogSelectionGeneration = UUID()
+                catalogActivationTargets[key] = target
+                runtimeSetupChains[key] = RuntimeSetupChain(plan: RuntimeSetupPlan(gameID: key,
+                    items: [.init(id: id, name: context.bundle?.displayName ?? Self.kindName(context.component.kind), size: nil)], needsAppleTerms: true), attempted: true)
+            } catch { show(error); return }
+        }
+        request(id, mode: .importGPTK)
+    }
 
-    private func bundle(_ id: String) -> RuntimeBundle? { manifest?.bundles.first { $0.id.rawValue == id } }
+    private func bundle(_ id: String) -> RuntimeBundle? { runtimeInstallContexts[id]?.bundle ?? manifest?.bundles.first { $0.id.rawValue == id } }
     private func requestedComponent(_ id: String) -> RuntimeComponent? {
+        if let context = runtimeInstallContexts[id] { return context.component }
         if let bundle = bundle(id) {
-            return manifest?.components.first { bundle.components.contains($0.id) && $0.wineBinary != nil }
+            return manifest?.components.first { bundle.components.contains($0.id) && (bundle.backend == .d3dmetal ? $0.kind == .d3dmetal : $0.kind == .wine) }
         }
         return manifest?.components.first { $0.id.rawValue == id }
     }
 
     private func request(_ id: String, mode: ConsentMode) {
-        guard canBeginGameOrRuntimeOperation() else { return }
+        if let task = dependencyAutoUpdateTask {
+            task.cancel()
+            Task { [weak self] in await task.value; self?.request(id, mode: mode) }
+            return
+        }
+        guard canBeginGameOrRuntimeOperation(allowingCatalogID: id) else { return }
         guard tasks[id] == nil, consentRequest == nil,
             let component = requestedComponent(id),
             mode != .importGPTK || component.kind == .d3dmetal else { return }
+        captureRuntimeInstallContext(id)
         let generation = UUID(); generations[id] = generation; requestModes[id] = mode
         let services = services
         errors[id] = nil; working[id] = .working(phase: .checkingSpace, fraction: nil); rebuildRows()
         tasks[id] = Task { [weak self] in
+            do { try await self?.persistRuntimeCatalogSelection() }
+            catch {
+                guard self?.generations[id] == generation else { return }
+                if launcherError(error) != .cancelled { self?.errors[id] = launcherError(error).userMessage }
+                self?.show(error)
+                self?.finish(id, generation: generation)
+                return
+            }
+            guard !Task.isCancelled, self?.generations[id] == generation else {
+                self?.finish(id, generation: generation); return
+            }
             let accepted = await services.isConsentAccepted(component)
             guard !Task.isCancelled, self?.generations[id] == generation else {
                 self?.finish(id, generation: generation); return
@@ -479,6 +646,7 @@ final class AppModel {
 
     func respondToConsent(accept: Bool) {
         guard let request = consentRequest else { return }
+        if !accept { revokeCatalogSetupActivation(request.id) }
         defer { scheduleRuntimeSetupUpdate() }
         consentRequest = nil
         guard accept, tasks[request.id] == nil,
@@ -551,6 +719,7 @@ final class AppModel {
 
     func cancelImport() {
         defer { scheduleRuntimeSetupUpdate() }
+        if let id = importRuntimeBundle?.id.rawValue ?? importComponent?.id.rawValue { revokeCatalogSetupActivation(id) }
         searchTask?.cancel(); searchTask = nil; searchGeneration = UUID()
         importComponent = nil; importRuntimeBundle = nil; importState = nil; extraRoots = []
         if consentRequest?.mode == .importGPTK { consentRequest = nil }
@@ -558,6 +727,7 @@ final class AppModel {
     }
 
     func cancel(_ id: String) {
+        revokeCatalogSetupActivation(id)
         defer { scheduleRuntimeSetupUpdate() }
         tasks[id]?.cancel()
         if consentRequest?.id == id { consentRequest = nil }
@@ -571,12 +741,13 @@ final class AppModel {
     }
 
     private func beginOperation(_ component: RuntimeComponent, from candidate: GPTKCandidate?, bundle: RuntimeBundle? = nil) {
-        guard canBeginGameOrRuntimeOperation() else { return }
-        let id = bundle?.id.rawValue ?? component.id.rawValue; let generation = UUID(); generations[id] = generation
+        let id = bundle?.id.rawValue ?? component.id.rawValue
+        guard canBeginGameOrRuntimeOperation(allowingCatalogID: id) else { return }
+        let generation = UUID(); generations[id] = generation
         let services = services
         errors[id] = nil; progressTimes[id] = nil
         working[id] = .working(phase: .staging, fraction: nil); rebuildRows()
-        let manifest = manifest
+        let manifest = runtimeInstallContexts[id]?.manifest ?? manifest
         tasks[id] = Task { [weak self] in
             let stream: RuntimeInstallStream
             if let bundle, let manifest { stream = services.install(bundle, manifest: manifest, from: candidate) }
@@ -651,11 +822,14 @@ final class AppModel {
 
     func remove(_ id: String) async {
         guard canBeginGameOrRuntimeOperation() else { return }
-        guard tasks[id] == nil, working[id] == nil else { return }
+        guard tasks[id] == nil, working[id] == nil, canRemoveRuntime(id) else { return }
         if let bundle = bundle(id), let manifest {
             working[id] = .working(phase: .deleting, fraction: nil); rebuildRows()
             defer { working[id] = nil; rebuildRows() }
-            do { try await services.remove(bundle, manifest: manifest); try await scanAndApply(); errors[id] = nil }
+            do {
+                try await persistRuntimeCatalogSelection()
+                try await services.remove(bundle, manifest: manifest); try await scanAndApply(); errors[id] = nil
+            }
             catch {
                 if case LauncherError.busy = error { errors[id] = nil }
                 else { errors[id] = launcherError(error).userMessage }
@@ -669,6 +843,7 @@ final class AppModel {
         working[id] = .working(phase: .deleting, fraction: nil); rebuildRows()
         defer { working[id] = nil; rebuildRows() }
         do {
+            try await persistRuntimeCatalogSelection()
             if let component { try await services.remove(component) }
             else if let bad { try await services.removeInvalid(bad) }
             try await scanAndApply()
@@ -724,7 +899,7 @@ final class AppModel {
         rebuildRows()
     }
 
-    private func rebuildRows() {
+    func rebuildRows() {
         isRuntimeOperationRunning = !tasks.isEmpty || !working.isEmpty
         var result: [RuntimeRow] = []
         let covered = Set((manifest?.bundles ?? []).flatMap(\.components))
@@ -733,27 +908,31 @@ final class AppModel {
             let components = (manifest?.components ?? []).filter { bundle.components.contains($0.id) }
             result.append(RuntimeRow(id: id, kindName: bundle.displayName, version: components.map { $0.version.rawValue }.joined(separator: " + "),
                 licenseName: components.map { $0.license.name }.joined(separator: " / "),
-                state: working[id] ?? errors[id].map { .failed(message: $0) } ?? installedBundles[id].map { .installed(source: $0.source) } ?? .notInstalled,
+                state: working[id] ?? dependencyWorking[id] ?? errors[id].map { .failed(message: $0) } ?? installedBundles[id].map { .installed(source: $0.source) } ?? .notInstalled,
                 canImportGPTK: bundle.backend == .d3dmetal, needsConsent: components.contains { $0.consent != nil },
-                summary: bundle.summary, downloadSize: components.reduce(Int64(0)) { $0 + ($1.size ?? 0) }))
+                summary: bundle.summary, downloadSize: components.reduce(Int64(0)) { total, component in
+                    let sum = total.addingReportingOverflow(component.size ?? 0)
+                    return sum.overflow ? Int64.max : sum.partialValue
+                }, backend: bundle.backend,
+                wineVersion: components.first { $0.kind == .wine }?.version.rawValue))
         }
         for component in manifest?.components ?? [] where !covered.contains(component.id) {
             let id = component.id.rawValue
             let existing = installed.first { $0.kind == component.kind && $0.version == component.version.rawValue }
             result.append(RuntimeRow(id: id, kindName: Self.kindName(component.kind), version: component.version.rawValue,
                 licenseName: component.license.name,
-                state: working[id] ?? errors[id].map { .failed(message: $0) } ?? existing.map { .installed(source: $0.source) } ?? .notInstalled,
-                canImportGPTK: component.kind == .d3dmetal, needsConsent: component.consent != nil, downloadSize: component.size))
+                state: working[id] ?? dependencyWorking[id] ?? errors[id].map { .failed(message: $0) } ?? existing.map { .installed(source: $0.source) } ?? .notInstalled,
+                canImportGPTK: component.kind == .d3dmetal, needsConsent: component.consent != nil, downloadSize: component.size, componentKind: component.kind))
         }
         for component in installed where !covered.contains(where: { $0.rawValue == Self.id(component) }) && !result.contains(where: { $0.id == Self.id(component) }) {
             let id = Self.id(component)
             result.append(RuntimeRow(id: id, kindName: Self.kindName(component.kind), version: component.version,
-                licenseName: String(localized: "Installed runtime"), state: working[id] ?? .installed(source: component.source), canImportGPTK: false, needsConsent: false))
+                licenseName: String(localized: "Installed runtime"), state: working[id] ?? .installed(source: component.source), canImportGPTK: false, needsConsent: false, componentKind: component.kind))
         }
         for (id, entry) in invalid.sorted(by: { $0.key < $1.key }) {
             result.append(RuntimeRow(id: id, kindName: entry.kind.map(Self.kindName) ?? String(localized: "Unknown runtime"), version: entry.rawName,
                 licenseName: String(localized: "Local runtime"), state: working[id] ?? .invalid(reason: entry.reason, removable: entry.removable),
-                canImportGPTK: false, needsConsent: false))
+                canImportGPTK: false, needsConsent: false, componentKind: entry.kind))
         }
         rows = result
         scheduleRuntimeSetupUpdate()
@@ -761,6 +940,10 @@ final class AppModel {
 
     func setRuntimeSetupProgress(_ progress: RuntimeSetupProgress?, for id: String) {
         if runtimeSetupProgress[id] != progress { runtimeSetupProgress[id] = progress }
+    }
+
+    func setDependencyUpdateError(_ error: LauncherError?, for id: String) {
+        errors[id] = error?.userMessage; rebuildRows()
     }
 
     private func cacheRuntimeConsent(_ accepted: Bool, for component: RuntimeComponent) {
@@ -795,6 +978,8 @@ final class AppModel {
     static func kindName(_ kind: ComponentKind) -> String {
         switch kind {
         case .wine: "Wine"; case .dxmt: "DXMT"; case .d3dmetal: "D3DMetal"
+        case .surroundAudio: String(localized: "Wine surround audio", comment: "Runtime component name")
+        case .genshinFps: String(localized: "Genshin FPS unlocker", comment: "Runtime component name")
         case .crypt32Fix: String(localized: "Wine crypt32 fix", comment: "Runtime component name")
         case .jadeite: String(localized: "Jadeite", comment: "Runtime component name"); case .steamShim: String(localized: "Steam shim", comment: "Runtime component name")
         }
@@ -811,6 +996,16 @@ typealias RuntimeRow = AppModel.RuntimeRow
 extension GPTKCandidate: @retroactive Identifiable {
     public var id: String { root.path }
 }
+
+#if DEBUG
+extension AppModel {
+    /// Inert screenshot state: no scan, install or removal runs.
+    func debugRuntimeState(installed: [InstalledComponent], bundles: [String: InstalledRuntimeBundle], working: [String: RowState]) {
+        self.installed = installed; installedBundles = bundles; self.working = working
+        rebuildRows()
+    }
+}
+#endif
 
 struct BundledRuntimeManifest {
     @concurrent static func load() async throws -> RuntimeManifest {
@@ -835,10 +1030,10 @@ extension AppModel {
     static var sampleRows: [RuntimeRow] {
         [RuntimeRow(id: "dxmt-wine11.0-dxmt0.80", kindName: "DXMT", version: "11.0-yaagl + 0.80", licenseName: "LGPL-2.1 / MIT",
             state: .working(phase: .staging, fraction: 0.42), canImportGPTK: false, needsConsent: false,
-            summary: "Wine 11.0 with game patches · DXMT 0.80", downloadSize: 465_267_389),
+            summary: "Wine 11.0 with game patches · DXMT 0.80", downloadSize: 465_267_389, backend: .dxmt),
          RuntimeRow(id: "d3dmetal-wine11.20-gptk4.0b3", kindName: "D3DMetal", version: "4.0b3", licenseName: "Apple Game Porting Toolkit",
             state: .notInstalled, canImportGPTK: true, needsConsent: true,
-            summary: "Wine 11.20 · Apple D3DMetal 4.0 beta 3", downloadSize: 307_352_548)]
+            summary: "Wine 11.20 · Apple D3DMetal 4.0 beta 3", downloadSize: 307_352_548, backend: .d3dmetal)]
     }
 
     static func preview(rows: [RuntimeRow] = sampleRows, consent: ConsentRequest? = nil,

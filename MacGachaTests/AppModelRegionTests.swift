@@ -235,6 +235,7 @@ private actor RegionGameServices: GameServices {
     private(set) var cancellations = 0
     func start() async { }
     func waitUntilIdle(_ id: String) async throws {}
+    func checkForUpdate(_ id: String) async throws -> GameStatus { status(id) }
     func status(_ id: String) -> GameStatus { statusReads.append(id); return .installed(tag: "1.0") }
     func record(_ id: String) throws -> GameRecord? {
         recordReads.append(id)
@@ -281,6 +282,10 @@ private final class RegionArt: GameArtProviding, Sendable {
 }
 
 private final class RegionHTTP: HTTPClient, Sendable {
+    func post(_ url: URL) async throws -> (HTTPResponseHead, HTTPBody) {
+        throw LauncherError.io("Unexpected POST")
+    }
+
     private let urls = Mutex<[URL]>([])
     var requests: [URL] { urls.withLock { $0 } }
     func get(_ url: URL, byteRangeFrom offset: Int64?) async throws -> (HTTPResponseHead, HTTPBody) {

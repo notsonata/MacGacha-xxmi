@@ -22,16 +22,20 @@ struct GameProgress {
     private var rateSample: Sample?
     private var batchStarted: ContinuousClock.Instant?
     private var emaRate: Double?
-    private var measuredRate: Double?
     private var lastUpdate: ContinuousClock.Instant?
     private var speedSamples: [Sample] = []
     private(set) var timing: GameTiming?
 
+    static func trackingPhase(for phase: OperationPhase) -> OperationPhase {
+        [.checkingSpace, .committing].contains(phase) ? .staging : phase
+    }
+
     mutating func beginPhase(_ phase: OperationPhase, at time: ContinuousClock.Instant) {
+        let phase = Self.trackingPhase(for: phase)
         guard self.phase != phase else { return }
         self.phase = phase; counter = nil; lastObservedBytes = nil
         lastObservedDownloaded = nil; lastObservedStaged = nil
-        rateSample = nil; batchStarted = nil; emaRate = nil; measuredRate = nil; speedSamples = []
+        rateSample = nil; batchStarted = nil; emaRate = nil; speedSamples = []
         timing = GameTiming(phaseStarted: time, lastAdvance: time, remaining: nil, hasFraction: false)
     }
 
@@ -45,7 +49,7 @@ struct GameProgress {
         let reset = lastObservedBytes.map { count < $0 } ?? false
         if counter != source || reset {
             if counter != nil { timing?.lastAdvance = time }
-            counter = source; batchStarted = time; emaRate = nil; measuredRate = nil
+            counter = source; batchStarted = time; emaRate = nil
             rateSample = Sample(time: time, bytes: count); speedSamples = []
         } else if let previous = rateSample {
             let dt = seconds(previous.time.duration(to: time))
@@ -53,7 +57,7 @@ struct GameProgress {
                 let rate = Double(max(0, count - previous.bytes)) / dt
                 let alpha = 1 - exp(-dt / seconds(Self.emaTimeConstant))
                 emaRate = emaRate.map { $0 + alpha * (rate - $0) } ?? rate
-                measuredRate = rate; rateSample = Sample(time: time, bytes: count)
+                rateSample = Sample(time: time, bytes: count)
             }
         }
         // Observe every event before throttling: growth, batch resets and source
@@ -70,16 +74,24 @@ struct GameProgress {
         guard let timing else { return nil }
         if let previous = lastUpdate, previous.duration(to: time) < Self.uiUpdateInterval { return nil }
         lastUpdate = time
-        // The bar keeps following downloads to the end: switching it to the staged
-        // counter would step back from 100% while the last objects assemble.
-        let shown = network > 0 ? (network, downloaded) : (totalStaged, staged)
-        let fraction = shown.0 > 0 ? min(1, Double(shown.1) / Double(shown.0)) : nil
-        return Value(fraction: fraction, speed: speed(at: time, bytes: max(0, downloaded), network: network), timing: timing)
+        // Count both delivery and local assembly across the whole operation.
+        // Adopted cache bytes are delivered, but still need local installation.
+        let combinesWork = phase == .staging
+        let shownTotal = combinesWork ? Double(max(0, network)) + Double(max(0, totalStaged))
+            : Double(max(0, network > 0 ? network : totalStaged))
+        let shownCount = combinesWork
+            ? Double(min(max(0, network), downloaded)) + Double(min(max(0, totalStaged), staged))
+            : Double(network > 0 ? downloaded : staged)
+        let fraction = shownTotal > 0 ? min(1, shownCount / shownTotal) : nil
+        return Value(fraction: fraction, speed: usesNetwork
+            ? speed(at: time, bytes: downloaded, network: network) : nil, timing: timing)
     }
 
     private func remaining(at time: ContinuousClock.Instant, count: Int64, total: Int64) -> Duration? {
+        // Only the average decides: events between chunks often carry no new bytes,
+        // and a real stop is reported by the stall threshold instead.
         guard total > 0, let batchStarted, batchStarted.duration(to: time) >= Self.etaWarmup,
-            let measuredRate, measuredRate > 0, let emaRate, emaRate > 0, emaRate.isFinite else { return nil }
+            let emaRate, emaRate > 0, emaRate.isFinite else { return nil }
         let seconds = Double(max(0, total - count)) / emaRate
         return .seconds(min(seconds, self.seconds(Self.maximumRemaining)))
     }

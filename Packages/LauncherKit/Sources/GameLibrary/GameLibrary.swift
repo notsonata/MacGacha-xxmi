@@ -35,15 +35,15 @@ public actor GameLibrary {
     public nonisolated var unownedExecutor: UnownedSerialExecutor { ioQueue.asUnownedSerialExecutor() }
 
     private let paths: AppPaths
-    private let api: DeliveryAPI
-    private let runner: OperationRunner
-    private let store: GameRecordStore
-    private let disk: any DiskSpaceProbe
+    let api: DeliveryAPI
+    let runner: OperationRunner
+    let store: GameRecordStore
+    let disk: any DiskSpaceProbe
     private let purgeable: any PurgeableSpaceProbe
-    private let log: EventLog?
-    private let operationGuard: (any GameOperationGuard)?
-    private let hooks: CrashHooks
-    private let fileOps: any FileOps
+    let log: EventLog?
+    let operationGuard: (any GameOperationGuard)?
+    let hooks: CrashHooks
+    let fileOps: any FileOps
     private var started = false
     private static let cleanupName = "uninstall-cleaned.json"
 
@@ -54,6 +54,13 @@ public actor GameLibrary {
         try await store.waitForPipelineDrain()
         let lease = try await store.acquireOperationLease()
         withExtendedLifetime(lease) {}
+    }
+
+    /// Join cache readers after its stream has completed, failed or been
+    /// discarded. This is separate from claiming the global mutation lease.
+    public func waitForPreDownloadDrain(_ id: String) async throws {
+        _ = try SafeIdentifier(id)
+        try await store.waitForPipelineDrain()
     }
 
     public init(paths: AppPaths, api: DeliveryAPI, runner: OperationRunner, store: GameRecordStore,
@@ -81,17 +88,28 @@ public actor GameLibrary {
     }
 
     public func status(_ game: GameDefinition) async -> GameStatus {
-        do {
-            guard let record = try await store.load(game.id) else { return .notInstalled }
-            do { try requireGameLocationAvailable(record.installPath) }
-            catch { return .locationUnavailable(record.installPath) }
-            if record.uninstalling { return .uninstallPaused }
-            if let pending = record.pending { return .paused(pending.kind) }
-            guard let installed = record.installed else { return .unknown }
-            let branch = try? await branch(game, cachedFallback: true)
-            if let branch, branch.tag != installed.tag { return .updateAvailable(from: installed.tag, to: branch.tag) }
-            return .installed(tag: installed.tag)
-        } catch { return .unknown }
+        (try? await readStatus(game, fresh: false)) ?? .unknown
+    }
+
+    /// Manual checks must surface request failures instead of treating a saved
+    /// branch as a successful fresh read. DeliveryAPI reads the current branch
+    /// directly; its HTTP client ignores the local URL cache. No build is needed.
+    public func checkForUpdate(_ game: GameDefinition) async throws -> GameStatus {
+        try await readStatus(game, fresh: true)
+    }
+
+    private func readStatus(_ game: GameDefinition, fresh: Bool) async throws -> GameStatus {
+        guard let record = try await store.load(game.id) else { return .notInstalled }
+        do { try requireGameLocationAvailable(record.installPath) }
+        catch { return .locationUnavailable(record.installPath) }
+        if record.uninstalling { return .uninstallPaused }
+        if let pending = record.pending { return .paused(pending.kind) }
+        guard let installed = record.installed else { return .unknown }
+        let latest: GameBranch?
+        if fresh { latest = try await branch(game, cachedFallback: false) }
+        else { latest = try? await branch(game, cachedFallback: true) }
+        if let latest, latest.tag != installed.tag { return .updateAvailable(from: installed.tag, to: latest.tag) }
+        return .installed(tag: installed.tag)
     }
 
     public func estimate(_ game: GameDefinition, voices: Set<String>, at location: URL) async throws -> GameEstimate {
@@ -162,7 +180,7 @@ public actor GameLibrary {
                         } catch LauncherError.unsafePath { skipped += 1 }
                     }
                     if skipped > 0 { await log?.log(.info, "game-library", "Managed paths left untouched", metadata: ["count": String(skipped)]) }
-                    for name in [".macgacha-staging", ".macgacha-receipts"] { try fs.removeItem(at: SafeRelativePath(name)) }
+                    for name in [".macgacha-staging", ".macgacha-receipts", ".macgacha-predownload"] { try fs.removeItem(at: SafeRelativePath(name)) }
                     try fs.removeFile(at: SafeRelativePath(".macgacha-state.json"))
                     try fs.pruneEmptyDirectories()
                     try fs.removePinnedRoot(onlyIfEmpty: true)
@@ -190,7 +208,7 @@ public actor GameLibrary {
         try await store.deleteGameDirectory(game.id)
     }
 
-    private func acquireGameLock(_ game: String) throws -> InstallLock {
+    func acquireGameLock(_ game: String) throws -> InstallLock {
         let id = try SafeIdentifier(game)
         let fs = try ContainedFileSystem(root: paths.root, fileOps: fileOps)
         try fs.createRootDurably()
@@ -269,10 +287,59 @@ public actor GameLibrary {
     private func updateStream(_ game: GameDefinition, record: GameRecord, installed: InstalledBuild, target: LibraryTarget,
         kind: PendingOperation.Kind, approved: Bool, lease: GameOperationLease) async throws -> LibraryPrepared {
         let snapshot = InstalledSnapshot(categories: try await planned(installed.categories, game: game))
-        let plan = try SophonPlanner.plan(id: planID(game, kind: kind, build: target.build, categories: target.categories), target: target.categories, installed: snapshot)
+        let id = try planID(game, kind: kind, build: target.build, categories: target.categories)
+        var requiresPatchMetadata = false
+        if kind == .update {
+            let cache = try PreDownloadStore(fs: ContainedFileSystem(root: record.installPath, fileOps: fileOps, expectedRootIdentity: record.installIdentity))
+            if let saved = try cache.load() {
+                requiresPatchMetadata = saved.plan.edition == game.id && saved.plan.sourceTag == installed.tag && saved.plan.targetTag == target.build.tag
+            }
+        }
+        let patch = kind == .update ? try await patchPlan(game, id: id, target: target, installed: installed, snapshot: snapshot,
+            requiresPatchMetadata: requiresPatchMetadata) : nil
+        let plan = try patch ?? SophonPlanner.plan(id: id, target: target.categories, installed: snapshot)
         return LibraryPrepared(lease: lease, stream: await runner.start(game.id, record: record, plan: plan, kind: kind,
             target: target.build, approved: approved, lease: lease, managedPaths: target.managedPaths,
                 reservedLocations: [paths.root, paths.runtimes]))
+    }
+
+    private func patchPlan(_ game: GameDefinition, id: SafeIdentifier, target: LibraryTarget,
+        installed: InstalledBuild, snapshot: InstalledSnapshot, requiresPatchMetadata: Bool) async throws -> InstallPlan? {
+        guard let branch = target.branch else {
+            if requiresPatchMetadata { throw LauncherError.transport("Update metadata unavailable") }
+            return nil
+        }
+        if !branch.diffTags.contains(installed.tag), !requiresPatchMetadata { return nil }
+        do {
+            guard try await api.config(biz: game.biz).enableLdiff else { return nil }
+            guard branch.diffTags.contains(installed.tag) else { throw LauncherError.io("patch source unavailable") }
+            let build = try await api.patchBuild(branch)
+            guard build.tag == target.build.tag, build.buildID == target.build.buildID else {
+                throw LauncherError.io("patch target changed")
+            }
+            var available: [String: PatchBuildCategory] = [:]
+            for category in build.categories {
+                guard available.updateValue(category, forKey: category.id) == nil else { throw LauncherError.io("duplicate patch category") }
+            }
+            var selected: [PlannedPatchCategory] = []
+            for full in target.categories {
+                guard let category = available[full.category.id], category.matchingField == full.category.matchingField else {
+                    throw LauncherError.io("missing patch category")
+                }
+                let manifest = try await api.patchManifest(category).manifest
+                selected.append(PlannedPatchCategory(category: category, manifest: manifest))
+            }
+            try Task.checkCancellation()
+            return try SophonPlanner.patchPlan(id: id, target: target.categories, patch: selected, installed: snapshot, sourceTag: installed.tag)
+        } catch {
+            if Task.isCancelled || error is CancellationError || (error as? LauncherError) == .cancelled { throw LauncherError.cancelled }
+            // A matching cache represents an explicit patch transfer. Do not
+            // silently replace it with a much larger chunk update on an outage.
+            if requiresPatchMetadata { throw LauncherError.transport("Update metadata unavailable") }
+            // Discovery is optional. Only a fully validated patch plan can
+            // replace the existing chunk route; resume never enters this path.
+            return nil
+        }
     }
 
     private func verifyAndRun(_ game: GameDefinition, record: GameRecord, target: LibraryTarget, kind: PendingOperation.Kind,
@@ -309,7 +376,7 @@ public actor GameLibrary {
         let build = try await api.build(branch, tag: tag)
         let selected = try SophonPlanner.selectCategories(branch, build: build, voices: voices)
         return LibraryTarget(build: InstalledBuild(tag: build.tag, buildID: build.buildID, categories: selected, voices: voices),
-            categories: try await planned(selected, game: game))
+            categories: try await planned(selected, game: game), branch: branch)
     }
 
     private func branch(_ game: GameDefinition, cachedFallback: Bool) async throws -> GameBranch {
@@ -404,6 +471,10 @@ public actor GameLibrary {
 private struct LibraryTarget: Sendable {
     let build: InstalledBuild
     let categories: [PlannedCategory]
+    let branch: GameBranch?
+    init(build: InstalledBuild, categories: [PlannedCategory], branch: GameBranch? = nil) {
+        self.build = build; self.categories = categories; self.branch = branch
+    }
     var managedPaths: Set<SafeRelativePath> { Set(categories.flatMap { $0.manifest.files.map(\.path) }) }
 }
 fileprivate struct LibraryPrepared: Sendable { let lease: GameOperationLease; let stream: AsyncThrowingStream<OperationEvent, any Error> }

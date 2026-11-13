@@ -55,6 +55,12 @@ private final class RecordingInjectionProvider: LaunchInjectionPreparing, Sendab
         var error: LauncherError?
         var onPrepare: (@Sendable () throws -> Void)?
         var finishFails = false
+        var onFinish: (@Sendable () -> Void)?
+        var discarded: [LaunchInjectionConfiguration] = []
+        var swept: [String: [URL]] = [:]
+        var applied: [LaunchInjectionConfiguration] = []
+        var applyGate: (started: InjectionLatch, release: InjectionLatch)?
+        var order: [String] = []
     }
     private let state = Mutex(State())
     init(configuration: LaunchInjectionConfiguration? = nil) {
@@ -67,6 +73,12 @@ private final class RecordingInjectionProvider: LaunchInjectionPreparing, Sendab
     func setConfiguration(_ configuration: LaunchInjectionConfiguration?) {
         state.withLock { $0.configuration = configuration }
     }
+    func validateEligibility(game: GameDefinition, settings: LaunchSettings) async throws {
+        if game.id == "zzz", settings.directX12,
+            state.withLock({ $0.configuration != nil }) {
+            throw LauncherError.io("Direct3D 11 required")
+        }
+    }
     func prepare(gameID: String, runtimeBundleID: String, backendD3D11: URL) async throws -> LaunchInjectionConfiguration? {
         let (error, action, configuration) = state.withLock { state in
             state.calls.append(Call(gameID: gameID, runtimeBundleID: runtimeBundleID, backendD3D11: backendD3D11))
@@ -78,13 +90,65 @@ private final class RecordingInjectionProvider: LaunchInjectionPreparing, Sendab
     }
     func failFinish() { state.withLock { $0.finishFails = true } }
     func finish(configuration: LaunchInjectionConfiguration) async throws {
-        let fails = state.withLock { state in
+        let (fails, action) = state.withLock { state in
             state.finished.append(configuration)
-            return state.finishFails
+            state.order.append("finish")
+            let action = state.onFinish
+            state.onFinish = nil
+            return (state.finishFails, action)
         }
+        action?()
         if fails { throw LauncherError.io("injected settings save failure") }
     }
     func allowFinish() { state.withLock { $0.finishFails = false } }
+    func onNextFinish(_ action: @escaping @Sendable () -> Void) { state.withLock { $0.onFinish = action } }
+    var discarded: [LaunchInjectionConfiguration] { state.withLock { $0.discarded } }
+    var swept: [String: [URL]] { state.withLock { $0.swept } }
+    var applied: [LaunchInjectionConfiguration] { state.withLock { $0.applied } }
+    var order: [String] { state.withLock { $0.order } }
+    func blockApply(started: InjectionLatch, release: InjectionLatch) {
+        state.withLock { $0.applyGate = (started, release) }
+    }
+    func discard(configuration: LaunchInjectionConfiguration) async {
+        state.withLock { $0.discarded.append(configuration) }
+    }
+    func sweepSessions(gameID: String, retaining: [URL]) async {
+        state.withLock { $0.swept[gameID] = retaining }
+    }
+    func applyLive(configuration: LaunchInjectionConfiguration) async throws {
+        let gate = state.withLock { state in
+            state.applied.append(configuration)
+            state.order.append("apply-start")
+            return state.applyGate
+        }
+        if let gate {
+            gate.started.open()
+            await gate.release.wait()
+        }
+        state.withLock { $0.order.append("apply-end") }
+    }
+}
+
+final class InjectionLatch: Sendable {
+    private let state = Mutex<(open: Bool, waiters: [CheckedContinuation<Void, Never>])>((false, []))
+    func open() {
+        let waiters = state.withLock { state in
+            state.open = true
+            defer { state.waiters = [] }
+            return state.waiters
+        }
+        for waiter in waiters { waiter.resume() }
+    }
+    func wait() async {
+        await withCheckedContinuation { continuation in
+            let ready = state.withLock { state -> Bool in
+                if state.open { return true }
+                state.waiters.append(continuation)
+                return false
+            }
+            if ready { continuation.resume() }
+        }
+    }
 }
 
 private final class InjectionOrder: Sendable {
@@ -122,6 +186,14 @@ private func makeInjectionSnapshot(_ f: ManagerFixture, name: String = UUID().uu
     return LaunchInjectionConfiguration(runnerURL: session.appendingPathComponent("hook-runner.exe"),
         injectorURL: session.appendingPathComponent("3dmloader.dll"),
         payloadURL: session.appendingPathComponent("d3d11.dll"), sessionDirectory: session)
+}
+
+private func makeZZZInjectionSnapshot(_ f: ManagerFixture) throws -> LaunchInjectionConfiguration {
+    let configuration = try makeInjectionSnapshot(f)
+    return LaunchInjectionConfiguration(runnerURL: configuration.runnerURL,
+        injectorURL: configuration.injectorURL, payloadURL: configuration.payloadURL,
+        sessionDirectory: configuration.sessionDirectory, gameID: "zzz",
+        targetExecutable: "ZenlessZoneZero.exe")
 }
 
 private func makeManager(_ f: ManagerFixture, selection: LaunchRuntimeSelection,
@@ -267,18 +339,25 @@ private func resolvedLaunch(_ f: ManagerFixture, selection: LaunchRuntimeSelecti
         #expect(try await f.journal() == nil)
     }
 
-    @Test func injectionSupportsOnlyGlobalStarRailOnTheProvenBundle() async throws {
+    @Test func injectionSupportsOnlyGlobalStarRailAndZZZOnTheProvenBundle() async throws {
         let f = try await ManagerFixture.make()
         let selection = try makeAllowedRuntime(f)
         let settings = LaunchSettings.defaults(for: "starrail")
-        #expect(LaunchInjection.supports(game: try #require(GameDefinition.find("starrail")), bundle: selection.bundle, settings: settings))
+        let starRail = try #require(GameDefinition.find("starrail"))
+        let zzz = try #require(GameDefinition.find("zzz"))
+        #expect(LaunchInjection.supports(game: starRail, bundle: selection.bundle, settings: settings))
         #expect(!LaunchInjection.supports(game: try #require(GameDefinition.find("starrail-cn")), bundle: selection.bundle, settings: settings))
-        #expect(!LaunchInjection.supports(game: try #require(GameDefinition.find("zzz")), bundle: selection.bundle, settings: settings))
+        #expect(!LaunchInjection.supports(game: try #require(GameDefinition.find("zzz-cn")), bundle: selection.bundle, settings: settings))
+        var zzzSettings = LaunchSettings.defaults(for: "zzz")
+        #expect(zzzSettings.directX12)
+        #expect(!LaunchInjection.supports(game: zzz, bundle: selection.bundle, settings: zzzSettings))
+        zzzSettings.directX12 = false
+        #expect(LaunchInjection.supports(game: zzz, bundle: selection.bundle, settings: zzzSettings))
         var dxmt = settings; dxmt.backend = .dxmt
-        #expect(!LaunchInjection.supports(game: try #require(GameDefinition.find("starrail")), bundle: selection.bundle, settings: dxmt))
+        #expect(!LaunchInjection.supports(game: starRail, bundle: selection.bundle, settings: dxmt))
         let other = InstalledRuntimeBundle(id: try SafeIdentifier("bundle-a"), root: selection.bundle.root,
             wineBinary: selection.bundle.wineBinary, digest: selection.bundle.digest, source: .download)
-        #expect(!LaunchInjection.supports(game: try #require(GameDefinition.find("starrail")), bundle: other, settings: settings))
+        #expect(!LaunchInjection.supports(game: starRail, bundle: other, settings: settings))
     }
 
     @Test func providerIsNotConsultedBeforePrefixPreparationSucceeds() async throws {
@@ -443,6 +522,82 @@ private func resolvedLaunch(_ f: ManagerFixture, selection: LaunchRuntimeSelecti
         #expect(f.proxy.starts == 0)
     }
 
+    @Test func zzzInjectionUsesItsExplicitTargetAndDirect3D11() async throws {
+        let f = try await ManagerFixture.make()
+        try addRootDriveMapping(f)
+        let selection = try makeAllowedRuntime(f)
+        try Data("game".utf8).write(to: f.installRoot.appendingPathComponent("ZenlessZoneZero.exe"))
+        let settings = LaunchSettings(backend: .d3dmetal, retina: false, frameLimit: nil,
+            directX12: false, compatibilityPatches: false)
+        try await BlockingIO.run { try LaunchSettingsStore(paths: f.paths).save(settings, for: "zzz") }
+        let configuration = try makeZZZInjectionSnapshot(f)
+        let provider = RecordingInjectionProvider(configuration: configuration)
+        let spawner = InjectionSpawner()
+        spawner.afterSpawn {
+            f.inspector.update {
+                $0.processes = [InspectedProcess(identity: spawner.identity,
+                    executablePath: "/wine/ZenlessZoneZero.exe", arguments: [])]
+                $0.alive = [spawner.identity]
+            }
+        }
+        let manager = makeManager(f, selection: selection, provider: provider, spawner: spawner)
+        let events = ManagerEvents()
+        let game = try #require(GameDefinition.find("zzz"))
+        let stream = await manager.launch(game: game, installRoot: f.installRoot, gameBuild: "3.3.0")
+        let consumer = Task { for await event in stream { await events.append(event) } }
+        await events.waitForRunning()
+
+        let call = try #require(spawner.calls.first)
+        let original = try LaunchResolver.resolve(recipe: try #require(Recipes.recipe(for: "zzz")),
+            settings: settings, installRoot: f.installRoot, prefix: f.prefix,
+            wineBinary: selection.bundle.wineBinary, proxyPort: f.proxy.port,
+            componentRoots: selection.componentRoots, baseEnvironment: [:],
+            runtimeBundleID: selection.bundle.id.rawValue)
+        #expect(call.arguments == [WinePath.windowsPath(for: configuration.runnerURL), "--loader",
+            WinePath.windowsPath(for: configuration.injectorURL), "--payload",
+            WinePath.windowsPath(for: configuration.payloadURL), "--target-exe",
+            "ZenlessZoneZero.exe", "--"] + original.arguments)
+        #expect(call.arguments.suffix(original.arguments.count) == original.arguments[...])
+        let journal = try await BlockingIO.run { try LaunchJournal(paths: f.paths).read(game: "zzz") }
+        #expect(journal?.injection?.gameID == "zzz")
+        #expect(journal?.injection?.resolvedTargetExecutable == "ZenlessZoneZero.exe")
+
+        try await f.end(manager); await consumer.value
+    }
+
+    @Test func zzzDirectX12InjectionFailsClosedBeforeSnapshotAndPreparation() async throws {
+        let f = try await ManagerFixture.make()
+        try addRootDriveMapping(f)
+        let selection = try makeAllowedRuntime(f)
+        try Data("game".utf8).write(to: f.installRoot.appendingPathComponent("ZenlessZoneZero.exe"))
+        let settings = LaunchSettings(backend: .d3dmetal, retina: false, frameLimit: nil,
+            directX12: true, compatibilityPatches: false)
+        try await BlockingIO.run { try LaunchSettingsStore(paths: f.paths).save(settings, for: "zzz") }
+        let provider = RecordingInjectionProvider(configuration: try makeZZZInjectionSnapshot(f))
+        let spawner = InjectionSpawner()
+        let manager = makeManager(f, selection: selection, provider: provider, spawner: spawner)
+        let events = ManagerEvents()
+        let game = try #require(GameDefinition.find("zzz"))
+        let stream = await manager.launch(game: game, installRoot: f.installRoot, gameBuild: "3.3.0")
+        let consumer = Task { for await event in stream { await events.append(event) } }
+        await events.wait { if case .failed = $0 { true } else { false } }
+        await consumer.value
+
+        let stages = await events.values.compactMap { event -> LaunchStage? in
+            if case .stage(let stage) = event { return stage }
+            return nil
+        }
+        #expect(!stages.contains(.snapshot))
+        #expect(!stages.contains(.prepare))
+        #expect(provider.calls.isEmpty)
+        #expect(try await BlockingIO.run { try LaunchSettingsStore(paths: f.paths).load("zzz") } == settings)
+        #expect(spawner.calls.isEmpty)
+        #expect(f.proxy.starts == 0)
+        #expect(try await BlockingIO.run {
+            try LaunchJournal(paths: f.paths).read(game: "zzz")
+        } == nil)
+    }
+
     @Test func failureAfterTheHelperStartsKeepsSupervisionUntilVerifiedEnd() async throws {
         let f = try await ManagerFixture.make()
         try addRootDriveMapping(f)
@@ -470,5 +625,165 @@ private func resolvedLaunch(_ f: ManagerFixture, selection: LaunchRuntimeSelecti
         #expect(f.proxy.stops == 1)
         #expect(try await f.journal() == nil)
         try await f.assertOriginalRestored()
+    }
+}
+
+@Suite(.timeLimit(.minutes(1))) struct LaunchInjectionLifecycleTests {
+    @Test func snapshotRejectedAfterPreparationIsDiscarded() async throws {
+        let f = try await ManagerFixture.make()
+        try addRootDriveMapping(f)
+        let configuration = try makeInjectionSnapshot(f)
+        let provider = RecordingInjectionProvider(configuration: configuration)
+        // The fixture's default bundle is not the verified runtime.
+        let manager = makeManager(f, selection: f.runtime.selected, provider: provider, spawner: InjectionSpawner())
+        let events = ManagerEvents(), consumer = await f.consume(manager, events: events)
+        await events.wait { if case .failed = $0 { true } else { false } }
+        await consumer.value
+        #expect(provider.discarded == [configuration])
+        #expect(provider.finished.isEmpty)
+    }
+
+    @Test func snapshotIsDiscardedWhenItsJournalWriteFails() async throws {
+        let f = try await ManagerFixture.make()
+        try addRootDriveMapping(f)
+        let selection = try makeAllowedRuntime(f)
+        let configuration = try makeInjectionSnapshot(f)
+        let provider = RecordingInjectionProvider(configuration: configuration)
+        // The next journal write is the one that would record the snapshot.
+        provider.onPrepare { f.journalOps.arm() }
+        let spawner = InjectionSpawner()
+        let manager = makeManager(f, selection: selection, provider: provider, spawner: spawner)
+        let events = ManagerEvents(), consumer = await f.consume(manager, events: events)
+        await events.wait { if case .failed = $0 { true } else { false } }
+        await manager.waitForSupervision(game: "starrail")
+        await consumer.value
+        #expect(spawner.calls.isEmpty)
+        #expect(provider.discarded == [configuration])
+    }
+
+    @Test func finishRepeatsSafelyWhenTheEndCheckpointFails() async throws {
+        let f = try await ManagerFixture.make()
+        try addRootDriveMapping(f)
+        let selection = try makeAllowedRuntime(f)
+        let configuration = try makeInjectionSnapshot(f)
+        let provider = RecordingInjectionProvider(configuration: configuration)
+        let manager = makeManager(f, selection: selection, provider: provider, spawner: InjectionSpawner())
+        let events = ManagerEvents(), consumer = await f.consume(manager, events: events)
+        await events.waitForRunning()
+        // finish succeeds, then the endLogged journal write fails.
+        provider.onNextFinish { f.journalOps.arm() }
+        try await f.end(manager)
+        await manager.waitForSupervision(game: "starrail")
+        await consumer.value
+        let pending = try #require(try await f.journal())
+        #expect(pending.endLogged != true)
+        #expect(provider.finished == [configuration])
+        try await manager.recoverIfNeeded(game: "starrail")
+        #expect(provider.finished == [configuration, configuration])
+        #expect(try await f.journal() == nil)
+        try await f.assertOriginalRestored()
+    }
+
+    @Test func liveApplyRequiresTheRunningJournaledSession() async throws {
+        let f = try await ManagerFixture.make()
+        try addRootDriveMapping(f)
+        let selection = try makeAllowedRuntime(f)
+        let configuration = try makeInjectionSnapshot(f)
+        let provider = RecordingInjectionProvider(configuration: configuration)
+        let manager = makeManager(f, selection: selection, provider: provider, spawner: InjectionSpawner())
+        await #expect(throws: LauncherError.self) { try await manager.applyLiveInjectionUpdate(game: "starrail") }
+        let events = ManagerEvents(), consumer = await f.consume(manager, events: events)
+        await events.waitForRunning()
+        try await manager.applyLiveInjectionUpdate(game: "starrail")
+        #expect(provider.applied == [configuration])
+        await #expect(throws: LauncherError.self) { try await manager.applyLiveInjectionUpdate(game: "zzz") }
+        try await f.end(manager)
+        await manager.waitForSupervision(game: "starrail")
+        await consumer.value
+        await #expect(throws: LauncherError.self) { try await manager.applyLiveInjectionUpdate(game: "starrail") }
+        #expect(provider.applied == [configuration])
+        #expect(provider.finished == [configuration])
+    }
+
+    @Test func liveApplyWithoutInjectionIsRejected() async throws {
+        let f = try await ManagerFixture.make()
+        try addRootDriveMapping(f)
+        let selection = try makeAllowedRuntime(f)
+        let provider = RecordingInjectionProvider(configuration: nil)
+        let manager = makeManager(f, selection: selection, provider: provider, spawner: InjectionSpawner())
+        let events = ManagerEvents(), consumer = await f.consume(manager, events: events)
+        await events.waitForRunning()
+        await #expect(throws: LauncherError.self) { try await manager.applyLiveInjectionUpdate(game: "starrail") }
+        #expect(provider.applied.isEmpty)
+        try await f.end(manager); await consumer.value
+    }
+
+    @Test func verifiedEndWaitsForAnInFlightLiveApply() async throws {
+        let f = try await ManagerFixture.make()
+        try addRootDriveMapping(f)
+        let selection = try makeAllowedRuntime(f)
+        let configuration = try makeInjectionSnapshot(f)
+        let provider = RecordingInjectionProvider(configuration: configuration)
+        let started = InjectionLatch(), release = InjectionLatch()
+        provider.blockApply(started: started, release: release)
+        let manager = makeManager(f, selection: selection, provider: provider, spawner: InjectionSpawner())
+        let events = ManagerEvents(), consumer = await f.consume(manager, events: events)
+        await events.waitForRunning()
+        // A cancelled caller does not abandon publication; end still waits for it.
+        let apply = Task { try await manager.applyLiveInjectionUpdate(game: "starrail") }
+        await started.wait()
+        apply.cancel()
+        await #expect(throws: LauncherError.self) { try await manager.applyLiveInjectionUpdate(game: "starrail") }
+        try await f.end(manager)
+        await events.wait { if case .ended = $0 { true } else { false } }
+        #expect(provider.finished.isEmpty)
+        release.open()
+        try await apply.value
+        await manager.waitForSupervision(game: "starrail")
+        await consumer.value
+        #expect(provider.order == ["apply-start", "apply-end", "finish"])
+        #expect(try await f.journal() == nil)
+    }
+
+    @Test func startupSweepLocksEachInjectableGameAndRetainsLiveSnapshots() async throws {
+        let f = try await ManagerFixture.make()
+        try addRootDriveMapping(f)
+        let selection = try makeAllowedRuntime(f)
+        let provider = RecordingInjectionProvider(configuration: nil)
+        let idle = makeManager(f, selection: selection, provider: provider, spawner: InjectionSpawner())
+        _ = await idle.reattachStartup()
+        #expect(Set(provider.swept.keys) == ["starrail", "zzz"])
+        #expect(provider.swept["zzz"] == [])
+
+        // Another instance holding the ZZZ session lock excludes that game.
+        do {
+            let held = try await BlockingIO.run { try SessionLock.acquire(paths: f.paths, game: "zzz") }
+            let provider2 = RecordingInjectionProvider(configuration: nil)
+            _ = await makeManager(f, selection: selection, provider: provider2, spawner: InjectionSpawner()).reattachStartup()
+            #expect(Set(provider2.swept.keys) == ["starrail"])
+            withExtendedLifetime(held) {}
+        }
+
+        // A reattached, still-running session is live: its game is skipped and
+        // its snapshot is retained for every other game's sweep.
+        let configuration = try makeInjectionSnapshot(f)
+        var snapshot = try await f.saveSnapshot(state: .running, processes: [f.gameProcess.identity],
+            gameExecutable: try SafeRelativePath("StarRail.exe"))
+        snapshot.injection = configuration
+        let written = snapshot
+        try await BlockingIO.run { try LaunchJournal(paths: f.paths).write(written) }
+        let provider3 = RecordingInjectionProvider(configuration: nil)
+        let reattached = makeManager(f, selection: selection, provider: provider3, spawner: InjectionSpawner())
+        let startup = await reattached.reattachStartup()
+        #expect(startup.sessions["starrail"] != nil)
+        #expect(Set(provider3.swept.keys) == ["zzz"])
+        #expect(provider3.swept["zzz"] == [configuration.sessionDirectory])
+
+        // The explicit apply routes to the journal's snapshot after reattach.
+        try await reattached.applyLiveInjectionUpdate(game: "starrail")
+        #expect(provider3.applied == [configuration])
+        try await f.end(reattached)
+        await reattached.waitForSupervision(game: "starrail")
+        #expect(provider3.finished == [configuration])
     }
 }

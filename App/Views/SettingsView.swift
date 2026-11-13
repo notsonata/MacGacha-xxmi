@@ -61,12 +61,32 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
             Section {
+                Toggle("Update dependencies automatically", isOn: Binding(
+                    get: { model.autoUpdateDependencies },
+                    set: { model.autoUpdateDependencies = $0 }
+                ))
+            } footer: {
+                Text("MacGacha installs new recommended versions of Wine and other dependencies in the background. Versions you choose by hand stay as they are.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Section {
                 Toggle("Animated backgrounds", isOn: Binding(
                     get: { animatedBackgrounds },
                     set: { animatedBackgrounds = $0; animatedChosen = true }
                 ))
             } footer: {
                 Text("Plays the game's animated art when HoYoPlay provides it. Still images use less power.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Section {
+                Toggle("Game Mode for games", isOn: Binding(
+                    get: { model.gameModeEnabled },
+                    set: { model.gameModeEnabled = $0 }
+                ))
+            } footer: {
+                Text("macOS gives a full-screen game priority on the CPU and GPU and lowers latency for AirPods and controllers. Takes effect the next time you play.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

@@ -3,6 +3,8 @@
 import Foundation
 
 public enum LauncherError: Error, Sendable, Equatable {
+    case malformedPatch
+    case unsupportedCompressor
     case unsafePath(String)
     case invalidDigest(String)
     case sizeMismatch(path: String, expected: Int64, actual: Int64)
@@ -20,6 +22,7 @@ public enum LauncherError: Error, Sendable, Equatable {
     case gameEditionUnknown
     case gameDistributionUnsupported
     case languageRestartFailed
+    case genshinFpsRiskNotAcknowledged
     case rosettaMissing
     case rosettaInstallerUnavailable
     case cancelled

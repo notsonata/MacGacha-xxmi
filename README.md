@@ -1,6 +1,6 @@
 # MacGacha — universal launcher for HoYoverse games on Apple Silicon
 
-> 🧪 **XXMI fork.** HSR mod support builds on MacGacha 0.1.3. Fork release binaries are published separately from upstream. See [fork releases](https://github.com/notsonata/MacGacha-xxmi/releases). The current regular release is [v0.1.3-xxmi.3](https://github.com/notsonata/MacGacha-xxmi/releases/tag/v0.1.3-xxmi.3).
+> 🧪 **XXMI fork.** HSR mod support builds on MacGacha 0.3.0. Fork release binaries are published separately from upstream. See [fork releases](https://github.com/notsonata/MacGacha-xxmi/releases). The current regular release is [v0.3.0-xxmi.1](https://github.com/notsonata/MacGacha-xxmi/releases/tag/v0.3.0-xxmi.1).
 
 A native macOS launcher for **Genshin Impact**, **Honkai: Star Rail** and **Zenless Zone Zero** on Apple Silicon. It aims to provide reliable resumable downloads, file verification, and managed Wine / DXMT / D3DMetal runtimes.
 
@@ -9,6 +9,8 @@ A native macOS launcher for **Genshin Impact**, **Honkai: Star Rail** and **Zenl
 Code and documentation in this repository may be written or modified with assistance from large language models (LLMs) and AI agents. The software is provided under the [GPL-3.0 license](LICENSE), as is, without warranty.
 
 ## XXMI mod support
+
+**Experimental ZZZ integration:** the app also includes an experimental Global Zenless Zone Zero profile with a separate bundled ZZMI 1.5.2 package, mods and saved settings. Select D3DMetal Wine 11.20 / GPTK 4.0b3 and turn **DirectX 12 off** before enabling injection. DX12 injection is rejected without changing launch settings. ZZZ injection and visible mod rendering have not yet been validated in a live game, so HSR is the only supported game.
 
 Use SRMI mods in **Honkai: Star Rail Global** directly from MacGacha. Open the **wrench** in the sidebar to install XXMI and manage your mods.
 
@@ -27,7 +29,8 @@ Mod injection is off by default. You must acknowledge the account-ban risk befor
 - **Refresh** detects folders you add manually. Newly discovered folders start disabled until you enable them.
 - **Move Mods Folder…** relocates your library to a `MacGacha-HSR-Mods` folder at your chosen location. Keep that drive connected when using mods.
 - **Saved SRMI settings** carry over between launches after the game closes. Changes not yet saved by SRMI may be lost if the game crashes.
-- Changes to enabled mods apply on the **next launch**.
+- Changes to enabled mods apply on the **next launch**. While a modded game is running, **XXMI → Apply Mods to Running Game** copies your current enabled mods into that game (not yet verified in a live game). Wait for it to finish, then switch to the game and press **F10** (**fn+F10** on a Mac keyboard) to reload mods. MacGacha never applies changes or presses keys by itself.
+- Each launch's working copy of the package and your mods is deleted after the game ends, and leftovers from crashes are cleaned up the next time MacGacha starts.
 
 ### Updates
 
@@ -37,25 +40,25 @@ Download the latest MacGacha DMG from [Releases](https://github.com/notsonata/Ma
 
 | Component | Version |
 |---|---|
-| MacGacha | 0.1.3, build 3 |
-| XXMI Libraries | 1.2.2 |
+| MacGacha | 0.3.0, build 4 |
+| XXMI Libraries | 1.2.3 |
 | SRMI | 2.4.3 |
-| HSR compatibility package | 2.4.3-macgacha.2 |
+| HSR compatibility package | 2.4.3-macgacha.3 |
 
-MacGacha uses the standalone XXMI injector core and a launch runner. You do not need XXMI Launcher. Mod injection currently supports **Star Rail Global with D3DMetal Wine 11.20 / GPTK 4.0b3**. Genshin Impact, Zenless Zone Zero and Mainland China editions do not yet support XXMI injection.
+MacGacha uses the standalone XXMI injector core and a launch runner. You do not need XXMI Launcher. Mod injection currently supports **Star Rail Global with D3DMetal Wine 11.20 / GPTK 4.0b3**. Genshin Impact and Mainland China editions do not support XXMI injection, and Zenless Zone Zero support is experimental.
 
 For source updates and package maintenance, see [the XXMI build guide](compat/xxmi/README.md).
 
 ## Downloads
 
-The [current regular release](https://github.com/notsonata/MacGacha-xxmi/releases/tag/v0.1.3-xxmi.3) has two uploaded downloads:
+The [current regular release](https://github.com/notsonata/MacGacha-xxmi/releases/tag/v0.3.0-xxmi.1) has two uploaded downloads:
 
 | Download | Purpose |
 |---|---|
-| [MacGacha-0.1.3-xxmi.3.dmg](https://github.com/notsonata/MacGacha-xxmi/releases/download/v0.1.3-xxmi.3/MacGacha-0.1.3-xxmi.3.dmg) | App installer, with the verified XXMI package already bundled. |
-| [XXMI-HSR-2.4.3-macgacha.2.zip](https://github.com/notsonata/MacGacha-xxmi/releases/download/v0.1.3-xxmi.3/XXMI-HSR-2.4.3-macgacha.2.zip) | Complete standalone package for independent installation. Extract it and select its `XXMI-HSR-2.4.3-macgacha.2` folder using **XXMI → Import Package…**. |
+| [MacGacha-0.3.0-xxmi.1.dmg](https://github.com/notsonata/MacGacha-xxmi/releases/download/v0.3.0-xxmi.1/MacGacha-0.3.0-xxmi.1.dmg) | App installer, with the verified XXMI package already bundled. |
+| [XXMI-HSR-2.4.3-macgacha.3.zip](https://github.com/notsonata/MacGacha-xxmi/releases/download/v0.3.0-xxmi.1/XXMI-HSR-2.4.3-macgacha.3.zip) | Complete standalone package for independent installation. Extract it and select its `XXMI-HSR-2.4.3-macgacha.3` folder using **XXMI → Import Package…**. |
 
-The standalone package contains `manifest.json`, `hsr-srmi.zip`, instructions and notices. It is different from a mod ZIP, which belongs in the panel's mod importer. [Corresponding XXMI source, raw package files and checksums](https://github.com/notsonata/MacGacha-xxmi/releases/tag/xxmi-2.4.3-macgacha.2) are kept on a separate compatibility release.
+The standalone package contains `manifest.json`, `hsr-srmi.zip`, instructions and notices. It is different from a mod ZIP, which belongs in the panel's mod importer. [Corresponding XXMI source, raw package files and checksums](https://github.com/notsonata/MacGacha-xxmi/releases/tag/xxmi-2.4.3-macgacha.3) are kept on a separate compatibility release.
 
 ## Install
 
@@ -94,6 +97,9 @@ This only changes MacGacha itself, not any system setting. The first launch can 
 ![Mainland China region with the interface in Simplified Chinese](assets/screenshots/region-cn.jpg)
 
 ## Roadmap
+
+**Implemented in source, awaiting live validation**
+- **ZZZ Global XXMI integration.** Separate ZZMI package and per-game mod/settings storage, target-aware standalone runner, and D3D11-only launch checks. No live injection/rendering acceptance or published ZZZ app release yet.
 
 **Done**
 - **HSR XXMI integration.** Offline verified setup, opt-in injection, a **Mods** switch above **Play**, per-mod switches, folder/ZIP import, library refresh for Finder-added folders, search, Finder actions and a movable library. Enabled mods are copied into each new launch snapshot, and SRMI user settings carry over between launches.

@@ -11,20 +11,35 @@ import Synchronization
 /// filesystem work runs on BlockingIO.
 public actor ModSupportStore {
     private nonisolated let runner: any ProcessRunner
-    private nonisolated let layout: ModSupportLayout
-    private nonisolated let fileOps: any FileOps
-    private nonisolated let gate = OperationGate()
+    nonisolated let layout: ModSupportLayout
+    private nonisolated let profile: ModSupportProfile
+    nonisolated let fileOps: any FileOps
+    nonisolated let gate = OperationGate()
+    /// Trash purges run after the gate is released so a large reclamation never
+    /// delays the next launch. Each purge waits for the previous one.
+    private var purge: Task<Void, Never>?
+    private var purgeFailures = 0
+    private var sessionMoveFailures: Set<String> = []
 
+    /// The original initializer remains the Global Star Rail profile.
     public init(paths: AppPaths, runner: any ProcessRunner = SystemProcessRunner()) {
-        self.runner = runner
-        self.fileOps = SystemFileOps()
-        layout = ModSupportLayout(paths: paths)
+        self.init(paths: paths, profile: .starRail, runner: runner)
     }
 
-    init(paths: AppPaths, runner: any ProcessRunner = SystemProcessRunner(), fileOps: any FileOps) {
+    public init(paths: AppPaths, profile: ModSupportProfile,
+        runner: any ProcessRunner = SystemProcessRunner()) {
         self.runner = runner
+        self.profile = profile
+        self.fileOps = SystemFileOps()
+        layout = ModSupportLayout(paths: paths, profile: profile)
+    }
+
+    init(paths: AppPaths, profile: ModSupportProfile = .starRail,
+        runner: any ProcessRunner = SystemProcessRunner(), fileOps: any FileOps) {
+        self.runner = runner
+        self.profile = profile
         self.fileOps = fileOps
-        layout = ModSupportLayout(paths: paths)
+        layout = ModSupportLayout(paths: paths, profile: profile)
     }
 
     /// The library the store currently reads, including a custom location whose
@@ -68,21 +83,103 @@ public actor ModSupportStore {
     /// revision never overwrites newer settings.
     public func finishLaunch(sessionDirectory: URL) async throws -> ModUserSettingsOutcome {
         let layout = layout, fileOps = fileOps
-        return try await gate.run {
-            try await BlockingIO.run {
+        let (outcome, name, moved) = try await gate.run {
+            // Harvest first: the directory is reclaimed only once the user file
+            // is durable, so a failed save keeps everything for the retry.
+            let outcome = try await BlockingIO.run {
                 try Self.finishLaunch(sessionDirectory: sessionDirectory, layout: layout, fileOps: fileOps)
             }
+            let name = try Self.canonicalSessionName(for: sessionDirectory, layout: layout)
+            guard outcome != .alreadyFinished else { return (outcome, name, true) }
+            let moved = await Self.moveToTrash(layout.sessionPath(name), layout: layout, fileOps: fileOps)
+            return (outcome, name, moved)
+        }
+        recordSessionMove(name, moved: moved)
+        schedulePurge()
+        return outcome
+    }
+
+    /// Removes a session that was prepared but never ran, for example when the
+    /// launch failed before its snapshot was journaled. Best effort: leftovers
+    /// are reclaimed by the startup sweep.
+    public func discardLaunch(sessionDirectory: URL) async {
+        let layout = layout, fileOps = fileOps
+        let result = try? await gate.run { () async throws -> (String, Bool) in
+            let name = try Self.canonicalSessionName(for: sessionDirectory, layout: layout)
+            return (name, await Self.moveToTrash(layout.sessionPath(name), layout: layout, fileOps: fileOps))
+        }
+        if let (name, moved) = result { recordSessionMove(name, moved: moved) }
+        schedulePurge()
+    }
+
+    /// Reclaims every canonical session of this profile not in `retaining`, and
+    /// stale live-apply staging. Callers hold this game's session lock and pass
+    /// every journal, live and recovery reference.
+    public func sweepSessions(retaining: [URL]) async -> ModSessionSweepReport {
+        let layout = layout, fileOps = fileOps
+        let retained = Set(retaining.map { $0.standardizedFileURL.path })
+        let result = try? await gate.run { () async throws -> (reclaimed: [String], failed: [String]) in
+            let candidates = try await BlockingIO.run {
+                try Self.sweepCandidates(layout: layout, fileOps: fileOps, retained: retained)
+            }
+            var reclaimed: [String] = [], failed: [String] = []
+            for path in candidates {
+                if await Self.moveToTrash(path, layout: layout, fileOps: fileOps) {
+                    reclaimed.append(path.components.last!)
+                } else {
+                    failed.append(path.components.last!)
+                }
+            }
+            return (reclaimed, failed)
+        }
+        guard let result else {
+            schedulePurge()
+            return ModSessionSweepReport(reclaimed: 0, failed: 1)
+        }
+        for name in result.reclaimed { sessionMoveFailures.remove(name) }
+        for name in result.failed { sessionMoveFailures.insert(name) }
+        schedulePurge()
+        return ModSessionSweepReport(reclaimed: result.reclaimed.count, failed: result.failed.count)
+    }
+
+    /// Waits for scheduled trash purges. Tests and diagnostics use this barrier.
+    public func drainReclamation() async {
+        while let current = purge {
+            await current.value
+            if purge == current { purge = nil }
+        }
+    }
+
+    /// Session folders or trash that the latest attempts could not remove.
+    /// They are retried by the next purge or the startup sweep.
+    public func reclamationFailureCount() -> Int {
+        purgeFailures + sessionMoveFailures.count
+    }
+
+    private func recordSessionMove(_ name: String, moved: Bool) {
+        if moved { sessionMoveFailures.remove(name) } else { sessionMoveFailures.insert(name) }
+    }
+
+    func schedulePurge() {
+        let previous = purge, layout = layout, fileOps = fileOps
+        purge = Task {
+            await previous?.value
+            let failures = (try? await BlockingIO.finishing {
+                Self.purgeTrash(layout: layout, fileOps: fileOps)
+            }) ?? 1
+            self.purgeFailures = failures
         }
     }
 
     /// Durable installation, preference and mod-library state.
     public func snapshot() async throws -> ModSupportSnapshot {
-        let layout = layout, fileOps = fileOps
+        let layout = layout, profile = profile, fileOps = fileOps
         return try await gate.run {
             try await BlockingIO.run {
                 let fs = try ContainedFileSystem(root: layout.root, fileOps: fileOps)
                 let state = try Self.loadState(layout: layout, fs: fs)
-                let installed = try Self.installedManifest(layout: layout, fs: fs, state: state, strict: false)
+                let installed = try Self.installedManifest(layout: layout, profile: profile,
+                    fs: fs, state: state, strict: false)
                 return state.snapshot(installedVersion: installed?.version,
                     modsDirectory: layout.libraryDirectory(for: state))
             }
@@ -92,13 +189,13 @@ public actor ModSupportStore {
     /// Stages the external archive, verifies every declared file, then atomically
     /// publishes the version without changing mods or preferences.
     public func install(manifest: ModPackageManifest, archive: URL) async throws {
-        let layout = layout, runner = runner, fileOps = fileOps
+        let layout = layout, profile = profile, runner = runner, fileOps = fileOps
         try await gate.run {
             try await BlockingIO.run {
                 try manifest.validate()
-                guard manifest.gameID == ModSupportConstants.gameID,
+                guard manifest.gameID == profile.gameID, profile.accepts(packageID: manifest.id),
                     manifest.supportedRuntimeBundleIDs.contains(ModSupportConstants.runtimeBundleID) else {
-                    throw LauncherError.io("Mod package does not support Honkai: Star Rail on the verified runtime")
+                    throw LauncherError.io("The mod package does not support this game on the verified runtime")
                 }
                 let fs = try ContainedFileSystem(root: layout.root, fileOps: fileOps)
                 let state = try Self.loadState(layout: layout, fs: fs)
@@ -230,25 +327,34 @@ public actor ModSupportStore {
 
     /// Returns nil while injection is off. Otherwise re-verifies the installed
     /// package and copies it plus enabled mods into an immutable launch session.
-    public func prepareLaunch(gameID: String, runtimeBundleID: String, backendD3D11: URL) async throws -> PreparedModLaunch? {
-        let layout = layout, fileOps = fileOps
+    public func prepareLaunch(gameID: String, runtimeBundleID: String, backendD3D11: URL,
+        directX12: Bool = false) async throws -> PreparedModLaunch? {
+        let layout = layout, profile = profile, fileOps = fileOps
+        // Retry leftover trash from earlier sessions, whatever this launch does.
+        defer { schedulePurge() }
         return try await gate.run {
             try await BlockingIO.run {
                 let fs = try ContainedFileSystem(root: layout.root, fileOps: fileOps)
                 let state = try Self.loadState(layout: layout, fs: fs)
                 guard state.injectionEnabled else { return nil }
-                guard gameID == ModSupportConstants.gameID else {
-                    throw LauncherError.io("Mod injection supports Honkai: Star Rail only")
+                guard gameID == profile.gameID else {
+                    throw LauncherError.io("Mod injection supports this game only through its own profile")
                 }
                 guard runtimeBundleID == ModSupportConstants.runtimeBundleID else {
                     throw LauncherError.io("Mod injection is unavailable for this runtime")
                 }
+                // ZZZ uses DirectX 12 by default; injection is only established
+                // for D3D11, so never silently change the user's launch settings.
+                guard !directX12 else {
+                    throw LauncherError.io("Mod injection requires Direct3D 11; turn off DirectX 12 first")
+                }
                 guard let version = state.activeVersion else {
                     throw LauncherError.io("Mod support is not installed")
                 }
-                guard let manifest = try Self.installedManifest(layout: layout, fs: fs, state: state, strict: true),
+                guard let manifest = try Self.installedManifest(layout: layout, profile: profile,
+                    fs: fs, state: state, strict: true),
                     manifest.version == version,
-                    manifest.gameID == ModSupportConstants.gameID,
+                    manifest.gameID == profile.gameID, profile.accepts(packageID: manifest.id),
                     manifest.supportedRuntimeBundleIDs.contains(runtimeBundleID) else {
                     throw LauncherError.io("The installed mod package is incompatible")
                 }
@@ -270,7 +376,8 @@ public actor ModSupportStore {
                     try Self.copyEnabledMods(state: state, library: library, fs: fs,
                         modsPath: modsPath)
                     try Self.configureD3DX(fs: fs, sessionPath: sessionPath,
-                        payloadDirectory: payloadDirectory, backend: backend)
+                        payloadDirectory: payloadDirectory, backend: backend,
+                        target: profile.runnerTarget)
                     try Self.seedUserConfig(fs: fs, layout: layout, sessionName: sessionName,
                         payloadDirectory: payloadDirectory)
                     let runnerPath = try Self.sessionFile(manifest.runnerPath, sessionPath: sessionPath)
@@ -286,7 +393,7 @@ public actor ModSupportStore {
                         payloadURL: payloadPath.resolved(against: layout.root),
                         sessionDirectory: sessionPath.resolved(against: layout.root))
                 } catch {
-                    try? fs.removeItem(at: sessionPath)
+                    _ = await Self.moveToTrash(sessionPath, layout: layout, fileOps: fileOps)
                     throw error
                 }
             }
@@ -403,8 +510,8 @@ extension ModSupportStore {
         return data
     }
 
-    static func installedManifest(layout: ModSupportLayout, fs: ContainedFileSystem,
-        state: ModSupportState, strict: Bool) throws -> ModPackageManifest? {
+    static func installedManifest(layout: ModSupportLayout, profile: ModSupportProfile,
+        fs: ContainedFileSystem, state: ModSupportState, strict: Bool) throws -> ModPackageManifest? {
         guard let version = state.activeVersion else { return nil }
         let path = layout.manifestPath(for: version)
         do {
@@ -415,7 +522,8 @@ extension ModSupportStore {
             let data = try fs.readFile(at: path, maxBytes: ModPackageManifest.maximumEncodedBytes)
             let manifest = try JSONDecoder().decode(ModPackageManifest.self, from: data)
             try manifest.validate()
-            guard manifest.version == version, manifest.gameID == ModSupportConstants.gameID,
+            guard manifest.version == version, manifest.gameID == profile.gameID,
+                profile.accepts(packageID: manifest.id),
                 manifest.supportedRuntimeBundleIDs.contains(ModSupportConstants.runtimeBundleID) else {
                 throw LauncherError.io("Installed mod package is incompatible")
             }

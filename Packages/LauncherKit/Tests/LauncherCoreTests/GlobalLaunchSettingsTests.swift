@@ -6,6 +6,28 @@ import TestSupport
 @testable import LauncherCore
 
 @Suite(.timeLimit(.minutes(1))) struct GlobalLaunchSettingsTests {
+    @Test func dependencyUpdatesDefaultOnAndPersistAlongsideOtherGlobalSettings() async throws {
+        try await BlockingIO.run {
+            let temp = try TempDir(), store = GlobalLaunchSettingsStore(paths: AppPaths(root: temp.url))
+            #expect(try store.load().autoUpdateDependencies)
+            #expect(try JSONDecoder().decode(GlobalLaunchSettings.self, from: Data("{}".utf8)).autoUpdateDependencies)
+            var settings = GlobalLaunchSettings(sessionLogsEnabled: false, gameModeEnabled: false)
+            settings.autoUpdateDependencies = false
+            try store.save(settings)
+            #expect(try store.load() == settings)
+        }
+    }
+    @Test func gameModeDefaultsOnAndRoundTripsGlobally() async throws {
+        try await BlockingIO.run {
+            let temp = try TempDir(), store = GlobalLaunchSettingsStore(paths: AppPaths(root: temp.url))
+            #expect(try store.load().gameModeEnabled)
+            #expect(try JSONDecoder().decode(GlobalLaunchSettings.self, from: Data(#"{"sessionLogsEnabled":false}"#.utf8)).gameModeEnabled)
+            try store.save(GlobalLaunchSettings(sessionLogsEnabled: false, gameModeEnabled: false))
+            #expect(try !store.load().gameModeEnabled)
+            #expect(try !store.load().sessionLogsEnabled)
+        }
+    }
+
     @Test func loggingDefaultsOnAndRoundTripsGlobally() async throws {
         try await BlockingIO.run {
             let temp = try TempDir(), paths = AppPaths(root: temp.url)

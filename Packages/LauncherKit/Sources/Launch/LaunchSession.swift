@@ -35,6 +35,11 @@ public struct LaunchSession: Codable, Equatable, Sendable {
     public var endLogged: Bool?
     /// Retains startup grace when inspection uncertainty changes state to pending.
     public var startupPending: Bool?
+    /// Durable qualification for automatic runtime cleanup, absent in legacy journals.
+    public var reachedRunning: Bool?
+    public var reachedReady: Bool?
+    /// Confirmed intervals between live process observations, excluding time while closed.
+    public var confirmedRunningSeconds: Double?
     public var recoveryLocation: LaunchRecoveryLocation?
     /// Additive recovery context: never rediscover a different launch's log or executable.
     public var sessionLogURL: URL?
@@ -51,6 +56,7 @@ public struct LaunchSession: Codable, Equatable, Sendable {
         sessionLogURL: URL? = nil, gameExecutable: SafeRelativePath? = nil, processGroupIDs: Set<Int32>? = nil,
         bootSessionUUID: String? = nil, sessionStartTime: UInt64? = nil, endLogged: Bool? = nil,
         recoveryLocation: LaunchRecoveryLocation? = nil, startupPending: Bool? = nil,
+        reachedRunning: Bool? = nil, reachedReady: Bool? = nil, confirmedRunningSeconds: Double? = nil,
         injection: LaunchInjectionConfiguration? = nil) {
         self.sessionID = sessionID; self.game = game; self.installRoot = installRoot; self.installIdentity = installIdentity
         self.prefix = prefix; self.bundleID = bundleID; self.runtimeDigest = runtimeDigest; self.wineBinary = wineBinary
@@ -62,17 +68,31 @@ public struct LaunchSession: Codable, Equatable, Sendable {
         self.endLogged = endLogged
         self.recoveryLocation = recoveryLocation
         self.startupPending = startupPending
+        self.reachedRunning = reachedRunning; self.reachedReady = reachedReady
+        self.confirmedRunningSeconds = confirmedRunningSeconds
         self.injection = injection
     }
 
     func validate() throws {
+        guard confirmedRunningSeconds.map({ $0.isFinite && $0 >= 0 && $0 <= 31_536_000 }) ?? true else {
+            throw LauncherError.journalCorrupt("Invalid running qualification")
+        }
         _ = try SafeIdentifier(game); _ = try SafeIdentifier(bundleID)
         for id in componentIDs { _ = try SafeIdentifier(id) }
         for url in [installRoot, prefix, wineBinary, wineserver] + (sessionLogURL.map { [$0] } ?? []) {
             guard url.isFileURL, url.path.hasPrefix("/"), !url.path.utf8.contains(0),
                 url.host == nil || url.host == "" || url.host == "localhost" else { throw LauncherError.journalCorrupt("Invalid session URL") }
         }
-        if let injection { try injection.validateForJournal() }
+        if let injection {
+            try injection.validateForJournal()
+            guard injection.resolvedGameID == game else {
+                throw LauncherError.journalCorrupt("Invalid injection game identity")
+            }
+            if let family = GameDefinition.find(game)?.family,
+                injection.resolvedTargetExecutable != LaunchInjection.targetExecutable(for: family) {
+                throw LauncherError.journalCorrupt("Invalid injection target identity")
+            }
+        }
         guard recipeVersion > 0, runtimeDigest.algorithm == .sha256, componentIDs.count <= 64,
             Set(componentIDs).count == componentIDs.count, processes.count <= 1024, hides.count <= 256,
             processes.allSatisfy({ $0.pid > 0 }), (processGroupIDs?.count ?? 0) <= 1024,

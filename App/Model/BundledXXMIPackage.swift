@@ -5,11 +5,13 @@ import LauncherCore
 import ModSupport
 
 /// The offline compatibility package shipped inside the app. Only the known
-/// archive name is accepted, so a stray resource can never be installed.
+/// per-game archive name is accepted, so a stray resource can never be installed.
 struct BundledXXMIPackage: Sendable, Equatable {
-    static let packageID = "hsr-srmi"
+    static let packageID = ModSupportProfile.starRail.packageID
     static let manifestName = "manifest.json"
-    static let archiveName = "hsr-srmi.zip"
+    static let archiveName = ModSupportProfile.starRail.archiveName
+    static let zzzPackageID = ModSupportProfile.zzz.packageID
+    static let zzzArchiveName = ModSupportProfile.zzz.archiveName
 
     let manifest: ModPackageManifest
     let archiveURL: URL
@@ -19,29 +21,52 @@ struct BundledXXMIPackage: Sendable, Equatable {
         self.archiveURL = archiveURL
     }
 
-    static func load(bundle: Bundle = .main) async throws -> BundledXXMIPackage {
-        let manifestURL = bundle.url(forResource: "manifest", withExtension: "json", subdirectory: "XXMI")
-            ?? bundle.url(forResource: "manifest", withExtension: "json")
-        let archiveURL = bundle.url(forResource: "hsr-srmi", withExtension: "zip", subdirectory: "XXMI")
-            ?? bundle.url(forResource: "hsr-srmi", withExtension: "zip")
+    static func load(gameID: String = ModSupportProfile.starRail.gameID,
+        bundle: Bundle = .main) async throws -> BundledXXMIPackage {
+        guard let profile = ModSupportProfile.find(gameID: gameID) else {
+            throw LauncherError.io("The bundled XXMI package is not available for this game")
+        }
+        let manifestURL = bundle.url(forResource: profile.manifestName, withExtension: nil,
+            subdirectory: profile.bundledSubdirectory)
+            ?? bundle.url(forResource: profile.manifestName, withExtension: nil)
+        let archiveBase = (profile.archiveName as NSString).deletingPathExtension
+        let archiveURL = bundle.url(forResource: archiveBase, withExtension: "zip",
+            subdirectory: profile.bundledSubdirectory)
+            ?? bundle.url(forResource: archiveBase, withExtension: "zip")
         guard let manifestURL, let archiveURL else {
             throw LauncherError.io("The bundled XXMI package is missing")
         }
-        return try await load(manifestURL: manifestURL, archiveURL: archiveURL)
+        return try await load(profile: profile, manifestURL: manifestURL, archiveURL: archiveURL)
     }
 
     /// Explicit package import: a folder containing the same sidecar manifest
-    /// and archive names as the built-in package.
-    static func load(directory: URL) async throws -> BundledXXMIPackage {
+    /// and archive names as the selected game's built-in package.
+    static func load(directory: URL, gameID: String = ModSupportProfile.starRail.gameID) async throws
+        -> BundledXXMIPackage {
         guard directory.isFileURL, directory.path.hasPrefix("/") else {
             throw LauncherError.io("The selected XXMI package must be a local folder")
         }
-        return try await load(manifestURL: directory.appendingPathComponent(manifestName),
-            archiveURL: directory.appendingPathComponent(archiveName))
+        guard let profile = ModSupportProfile.find(gameID: gameID) else {
+            throw LauncherError.io("The selected package is not available for this game")
+        }
+        // Explicit imports accept the profile's unique manifest or the plain
+        // `manifest.json` name used by packages built before profiles existed.
+        let manifestURL = [profile.manifestName, manifestName].first {
+            FileManager.default.fileExists(atPath: directory.appendingPathComponent($0).path)
+        }.map { directory.appendingPathComponent($0) }
+            ?? directory.appendingPathComponent(profile.manifestName)
+        return try await load(manifestURL: manifestURL,
+            archiveURL: directory.appendingPathComponent(profile.archiveName), profile: profile)
     }
 
-    private static func load(manifestURL: URL, archiveURL: URL) async throws -> BundledXXMIPackage {
-        guard archiveURL.lastPathComponent == archiveName else {
+    private static func load(profile: ModSupportProfile, manifestURL: URL,
+        archiveURL: URL) async throws -> BundledXXMIPackage {
+        try await load(manifestURL: manifestURL, archiveURL: archiveURL, profile: profile)
+    }
+
+    private static func load(manifestURL: URL, archiveURL: URL,
+        profile: ModSupportProfile) async throws -> BundledXXMIPackage {
+        guard archiveURL.lastPathComponent == profile.archiveName else {
             throw LauncherError.io("The XXMI package archive has an unexpected name")
         }
         let manifest = try await BlockingIO.run {
@@ -57,8 +82,8 @@ struct BundledXXMIPackage: Sendable, Equatable {
                 throw LauncherError.io("The XXMI package manifest is invalid")
             }
         }
-        guard manifest.id == packageID else {
-            throw LauncherError.io("The selected package is not XXMI for Honkai: Star Rail")
+        guard manifest.id == profile.packageID, manifest.gameID == profile.gameID else {
+            throw LauncherError.io("The selected package is not XXMI for this game")
         }
         return BundledXXMIPackage(manifest: manifest, archiveURL: archiveURL)
     }

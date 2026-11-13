@@ -8,6 +8,10 @@ import DownloadEngine
 /// Pull-driven fixture transport. URL paths resolve only below root; queries are ignored.
 /// Each body reads a fixed-size snapshot in at most 64 KiB pieces and closes on discard/cancel.
 public struct FileBackedHTTPClient: HTTPClient {
+    public func post(_ url: URL) async throws -> (HTTPResponseHead, HTTPBody) {
+        try await get(url, byteRangeFrom: nil)
+    }
+
     private let fs: ContainedFileSystem
     public init(root: URL) throws { fs = try ContainedFileSystem(root: root) }
 

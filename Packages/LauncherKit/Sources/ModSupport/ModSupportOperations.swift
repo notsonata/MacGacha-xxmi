@@ -240,7 +240,7 @@ extension ModSupportStore {
     }
 
     static func configureD3DX(fs: ContainedFileSystem, sessionPath: SafeRelativePath,
-        payloadDirectory: SafeRelativePath?, backend: String) throws {
+        payloadDirectory: SafeRelativePath?, backend: String, target: String) throws {
         let prefix = payloadDirectory.map { $0.description + "/" } ?? ""
         let path = try SafeRelativePath(sessionPath.description + "/" + prefix + "d3dx.ini")
         var contents: String?
@@ -253,7 +253,7 @@ extension ModSupportStore {
             contents = text
         }
         var ini = D3DXIni(contents)
-        try ini.set(section: "Loader", key: "target", value: ModSupportConstants.runnerTarget)
+        try ini.set(section: "Loader", key: "target", value: target)
         try ini.set(section: "Loader", key: "loader", value: "hook-runner.exe")
         try ini.set(section: "System", key: "proxy_d3d11", value: backend)
         try ini.addIfMissing(section: "Include", key: "include_recursive", value: "Mods")

@@ -40,6 +40,8 @@ import GameLibrary
                 try f.model.saveLaunchSettings(f.model.launchSettings(for: "genshin"), for: "genshin")
             }
             f.model.sessionLogsEnabled = false
+            f.model.gameModeEnabled = false
+            #expect(f.model.gameModeEnabled)
             #expect(f.model.sessionLogsEnabled)
             #expect(preferences.writeCount == 0)
         }
@@ -253,6 +255,7 @@ private final class LanguageGameServices: GameServices, Sendable {
     func setRecord(_ record: GameRecord) { state.withLock { $0.record = record } }
     func start() async {}
     func waitUntilIdle(_ id: String) async throws { await drain.wait() }
+    func checkForUpdate(_ id: String) async throws -> GameStatus { await status(id) }
     func status(_ id: String) async -> GameStatus {
         state.withLock { id == "genshin" ? ($0.record.pending.map { .paused($0.kind) } ?? .installed(tag: "1.0")) : .notInstalled }
     }

@@ -10,7 +10,7 @@ private let installRoot = URL(fileURLWithPath: "/Users/x/Games/MacGacha/Honkai: 
 private let prefix = URL(fileURLWithPath: "/Prefixes/game-bundle", isDirectory: true)
 private let wine = URL(fileURLWithPath: "/Runtimes/bundle/bin/wine")
 private let roots: [ComponentKind: URL] = [.jadeite: URL(fileURLWithPath: "/Components/jadeite 4.1.0"),
-    .steamShim: URL(fileURLWithPath: "/Components/steam-shim")]
+    .steamShim: URL(fileURLWithPath: "/Components/steam-shim"), .genshinFps: URL(fileURLWithPath: "/Components/genshin-fps")]
 
 private func resolve(_ game: String, settings: LaunchSettings? = nil, components: [ComponentKind: URL] = roots,
     base: [String: String] = [:]) throws -> ResolvedLaunch {
@@ -34,7 +34,7 @@ private func resolve(_ game: String, settings: LaunchSettings? = nil, components
     #expect(value.copyIfPresent.first?.source.description == "HoYoKProtect.sys")
     #expect(value.copyIfPresent.first?.toSystem32 == "HoYoKProtect.sys")
     #expect(value.requiredComponents == [.steamShim])
-    #expect(value.preparation == PreparationRequest(retina: false, steamShim: roots[.steamShim], dxmtExtras: [], nvidiaKeys: false))
+    #expect(value.preparation == PreparationRequest(retina: false, steamShim: roots[.steamShim], dxmtExtras: [], nvidiaKeys: false, windowsVersion: .win11))
 }
 
 @Test func starRailDefaults() throws {
@@ -140,6 +140,23 @@ private func resolve(_ game: String, settings: LaunchSettings? = nil, components
     #expect(try resolve("genshin", settings: settings).environment["D3DM_MAX_FPS"] == nil)
 }
 
+@Test func gameModeUsesMirroredWrapperLoaderAndServerOnlyWhenEnabled() throws {
+    let root = URL(fileURLWithPath: "/Runtimes/GameMode/bundle/MacGacha Game.app/Contents")
+    let helper = GameModeRuntime(game: GameDefinition.find("starrail")!, root: root, wineBinary: root.appendingPathComponent("MacOS/wine-wrapper"), wineserver: root.appendingPathComponent("bin/wineserver"))
+    let recipe = try #require(Recipes.recipe(for: "starrail"))
+    for enabled in [true, false] {
+        let result = try LaunchResolver.resolve(recipe: recipe, settings: .defaults(for: "starrail"), installRoot: installRoot,
+            prefix: prefix, wineBinary: wine, proxyPort: 1, componentRoots: roots, baseEnvironment: ["WINELOADER": "/inherited/bad"],
+            gameModeRuntime: helper, gameModeEnabled: enabled)
+        #expect(result.executable == (enabled ? helper.wineBinary : wine))
+        #expect(result.environment["WINELOADER"] == (enabled ? helper.loader.path : nil))
+        #expect(result.environment["WINESERVER"] == (enabled ? helper.wineserver.path : nil))
+        #expect(result.arguments == [WinePath.windowsPath(for: roots[.jadeite]!.appendingPathComponent("jadeite.exe")),
+            WinePath.windowsPath(for: installRoot.appendingPathComponent("StarRail.exe"))])
+    }
+    #expect(try resolve("starrail").environment["WINELOADER"] == nil)
+}
+
 @Test(arguments: [false, true])
 func starRailUnlockRequestsOneTwenty(patches: Bool) throws {
     let game = "starrail"
@@ -155,13 +172,16 @@ func starRailUnlockRequestsOneTwenty(patches: Bool) throws {
     #expect(throws: LauncherError.self) { try resolve(game, settings: settings) }
 }
 @Test(arguments: [false, true], [RuntimeBackend.d3dmetal, .dxmt])
-func unverifiedChinaStarRailNeverPreparesFrameRate(unlock: Bool, backend: RuntimeBackend) throws {
+func chinaStarRailPreparesFrameRateWithItsOwnKey(unlock: Bool, backend: RuntimeBackend) throws {
     var settings = LaunchSettings.defaults(for: "starrail-cn"); settings.unlockFPS = unlock; settings.backend = backend
-    #expect(try resolve("starrail-cn", settings: settings).preparation.starRailFrameRate == nil)
+    let preparation = try resolve("starrail-cn", settings: settings).preparation
+    #expect(preparation.starRailFrameRate == (unlock ? .unlock120 : .restore))
+    #expect(preparation.starRailRegion == .mainlandChina)
+    #expect(try resolve("starrail").preparation.starRailRegion == .global)
 }
-@Test(arguments: [("starrail", true), ("starrail-cn", false), ("genshin", false), ("genshin-cn", false),
+@Test(arguments: [("starrail", true), ("starrail-cn", true), ("genshin", false), ("genshin-cn", false),
     ("zzz", false), ("zzz-cn", false), ("unknown", false)])
-func starRailUnlockEligibilityIsGlobalOnly(game: String, offered: Bool) {
+func starRailUnlockEligibilityCoversBothEditions(game: String, offered: Bool) {
     #expect(LaunchResolver.offersStarRailUnlock(game) == offered)
 }
 @Test(arguments: ["genshin", "genshin-cn", "zzz", "zzz-cn"], [false, true])
@@ -174,4 +194,17 @@ func genshinAndZZZNeverTouchStarRailValue(game: String, unlock: Bool) throws {
     let value = try resolve("starrail", settings: settings)
     if backend == .d3dmetal { #expect(value.environment["D3DM_MAX_FPS"] == "90") }
     else { #expect(value.environment["DXMT_CONFIG"]?.contains("d3d11.preferredMaxFrameRate=90") == true) }
+}
+
+@Test(arguments: ["genshin", "zzz", "starrail", "genshin-cn", "zzz-cn", "starrail-cn"], [RuntimeBackend.d3dmetal, .dxmt])
+func windows11ProfileIsScopedAndIndependentOfPatches(game: String, backend: RuntimeBackend) throws {
+    for patches in [false, true] {
+        var settings = LaunchSettings.defaults(for: game)
+        settings.backend = backend
+        settings.compatibilityPatches = patches
+        var components = roots
+        components[.crypt32Fix] = URL(fileURLWithPath: "/Components/crypt32")
+        let value = try resolve(game, settings: settings, components: components)
+        #expect(value.preparation.windowsVersion == (["genshin", "zzz", "genshin-cn", "zzz-cn"].contains(game) ? .win11 : nil))
+    }
 }

@@ -4,6 +4,8 @@ import Foundation
 import Testing
 import LauncherCore
 import ModSupport
+import RuntimeManager
+import Launch
 @testable import MacGacha
 
 @Suite(.timeLimit(.minutes(1))) @MainActor
@@ -199,11 +201,43 @@ struct ModSupportModelTests {
         #expect(model.modSupportSnapshot?.mods.count == 1)
     }
 
-    @Test func onlyStarRailIsSupported() {
+    @Test func onlyGlobalStarRailAndZZZAreSupported() {
         #expect(AppModel.supportsModSupport(gameID: "starrail"))
+        #expect(AppModel.supportsModSupport(gameID: "zzz"))
         #expect(!AppModel.supportsModSupport(gameID: "starrail-cn"))
+        #expect(!AppModel.supportsModSupport(gameID: "zzz-cn"))
         #expect(!AppModel.supportsModSupport(gameID: "genshin"))
-        #expect(!AppModel.supportsModSupport(gameID: "zzz"))
+    }
+
+    /// The upstream catalog recommends newer Wine for D3DMetal. That bundle
+    /// never inherits mod eligibility; only the verified bundle does.
+    @Test func newerRecommendedWineIsNotEligibleForInjection() throws {
+        let root = try temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = makeModel(root: root)
+        let url = try #require(Bundle.main.url(forResource: "runtime-manifest", withExtension: "json"))
+        let recommended = try RuntimeManifest.load(from: url)
+        #expect(recommended.defaultBundle(for: .d3dmetal)?.id.rawValue != ModSupportProfile.starRail.verifiedRuntimeBundleID)
+        var settings = LaunchSettings.defaults(for: "starrail")
+        settings.backend = .d3dmetal
+        model.launchSettingsCache["starrail"] = settings
+        model.manifest = recommended
+        #expect(model.modSupportRuntimeIneligible(for: "starrail"))
+
+        // Only the verified bundle remains: eligible.
+        var json = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        let bundles = try #require(json["bundles"] as? [[String: Any]])
+        json["bundles"] = bundles.filter { ($0["backend"] as? String) != "d3dmetal"
+            || ($0["id"] as? String) == ModSupportProfile.starRail.verifiedRuntimeBundleID }
+        let verifiedURL = root.appendingPathComponent("verified-manifest.json")
+        try JSONSerialization.data(withJSONObject: json).write(to: verifiedURL)
+        model.manifest = try RuntimeManifest.load(from: verifiedURL)
+        #expect(!model.modSupportRuntimeIneligible(for: "starrail"))
+
+        settings.backend = .dxmt
+        model.launchSettingsCache["starrail"] = settings
+        #expect(model.modSupportRuntimeIneligible(for: "starrail"))
+        #expect(!model.modSupportRuntimeIneligible(for: "genshin"))
     }
 }
 

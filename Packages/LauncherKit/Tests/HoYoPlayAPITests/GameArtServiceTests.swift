@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // MacGacha — https://github.com/deruta74/MacGacha — see LICENSE and NOTICE (additional term under GPL section 7(b)).
 import Foundation
+import Dispatch
 import Synchronization
 import Testing
 import LauncherCore
@@ -236,6 +237,10 @@ private func artFixtures(_ cdn: MockCDN, background: String = "https://fastcdn.h
 
 private func hashURL(_ string: String) -> String { var h = StreamingHasher(.sha256); h.update(Data(string.utf8)); return h.finalize().hex }
 private struct NoLengthHTTP: HTTPClient {
+    func post(_ url: URL) async throws -> (HTTPResponseHead, HTTPBody) {
+        throw LauncherError.io("Unexpected POST")
+    }
+
     let cdn: MockCDN
     func get(_ url: URL, byteRangeFrom offset: Int64?) async throws -> (HTTPResponseHead, HTTPBody) {
         guard url.lastPathComponent == "preferred" else { return try await cdn.get(url, byteRangeFrom: offset) }
@@ -299,6 +304,10 @@ func skippedAssetsAndInvalidResponsesLogSafeReasons() async throws {
 }
 
 private final class StallingArtHTTP: HTTPClient, Sendable {
+    func post(_ url: URL) async throws -> (HTTPResponseHead, HTTPBody) {
+        throw LauncherError.io("Unexpected POST")
+    }
+
     let cdn: MockCDN
     let started = Mutex(false)
     init(cdn: MockCDN) { self.cdn = cdn }
@@ -329,6 +338,10 @@ func refreshRequestsTheInjectedLanguageAndRefetchesWhenItChanges() async throws 
 }
 
 private final class QueryRecordingHTTP: HTTPClient, Sendable {
+    func post(_ url: URL) async throws -> (HTTPResponseHead, HTTPBody) {
+        throw LauncherError.io("Unexpected POST")
+    }
+
     let cdn: MockCDN
     private let urls = Mutex<[URL]>([])
     init(cdn: MockCDN) { self.cdn = cdn }
@@ -453,4 +466,56 @@ func boundsFitThreeGamesWithEveryBackgroundAsset() async throws {
 func highlightsBrowserLinksAreValidatedAlsoWhenDecoded(value: String) throws {
     let bytes = try JSONSerialization.data(withJSONObject: ["image": "file:///tmp/icon.png", "link": value])
     #expect(try JSONDecoder().decode(GameHighlights.self, from: bytes).link == nil)
+}
+
+@Test func cachedGameModeIconsAreValidatedWithoutRemoteRequests() async throws {
+    let temp = try TempDir(), http = MockCDN(); try artFixtures(http)
+    let directory = temp.url.appendingPathComponent("GameArt")
+    let populated = await GameArtService(cacheDirectory: directory, http: http).refresh()
+    let icon = try #require(populated["genshin"]?.icon)
+    let service = GameArtService(cacheDirectory: directory, http: http)
+    let count = http.requestLog.count
+    #expect(await service.cachedIcon(for: "genshin") != nil)
+    #expect(await service.cachedIcon(for: "genshin-cn") == nil)
+    try await BlockingIO.run {
+        let fs = try ContainedFileSystem(root: directory)
+        try fs.writeAtomically(Data("not an image".utf8), to: SafeRelativePath(icon.lastPathComponent))
+    }
+    #expect(await service.cachedIcon(for: "genshin") == nil)
+    #expect(http.requestLog.count == count)
+}
+
+@Test func stalledArtCacheDoesNotBlockAsyncProgress() async throws {
+    let temp = try TempDir(), io = CacheStallFileOps(), cdn = MockCDN()
+    try artFixtures(cdn)
+    let service = GameArtService(cacheDirectory: temp.url.appendingPathComponent("GameArt"), http: cdn, fileOps: io)
+    let task = Task { await service.refresh() }
+    defer { io.release.signal(); task.cancel() }
+    for await _ in io.entered.stream { break }
+    io.release.signal()
+    #expect(!(await task.value).isEmpty)
+    #expect(!io.timedOut.withLock { $0 })
+}
+
+@Test func cancelledArtPublicationJoinsUncancelledPartCleanup() async throws {
+    let temp = try TempDir(), cdn = MockCDN()
+    try artFixtures(cdn)
+    let entered = AsyncStream<Void>.makeStream(), release = DispatchSemaphore(value: 0)
+    let io = CacheFaultFileOps { source, _ in
+        if source.hasPrefix(".incoming-") {
+            entered.continuation.yield(())
+            guard release.wait(timeout: .now() + 30) == .success else { throw LauncherError.io("Test deadline") }
+            throw LauncherError.cancelled
+        }
+    }
+    let directory = temp.url.appendingPathComponent("GameArt")
+    let service = GameArtService(cacheDirectory: directory, http: cdn, fileOps: io)
+    let task = Task { await service.refresh() }
+    defer { release.signal(); task.cancel() }
+    for await _ in entered.stream { break }
+    task.cancel(); release.signal()
+    #expect(await task.value.isEmpty)
+    #expect(!io.cancelledCleanup.withLock { $0 })
+    let names = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+    #expect(!names.contains { $0.hasPrefix(".incoming-") })
 }

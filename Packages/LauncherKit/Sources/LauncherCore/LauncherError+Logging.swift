@@ -7,6 +7,8 @@ public extension LauncherError {
     /// Stable, path-free case names shared by operational logs.
     var logCase: String {
         switch self {
+        case .malformedPatch: "malformedPatch"
+        case .unsupportedCompressor: "unsupportedCompressor"
         case .unsafePath: "unsafePath"
         case .invalidDigest: "invalidDigest"
         case .sizeMismatch: "sizeMismatch"
@@ -24,6 +26,7 @@ public extension LauncherError {
         case .gameEditionUnknown: "gameEditionUnknown"
         case .gameDistributionUnsupported: "gameDistributionUnsupported"
         case .languageRestartFailed: "languageRestartFailed"
+        case .genshinFpsRiskNotAcknowledged: "genshinFpsRiskNotAcknowledged"
         case .rosettaMissing: "rosettaMissing"
         case .rosettaInstallerUnavailable: "rosettaInstallerUnavailable"
         case .cancelled: "cancelled"

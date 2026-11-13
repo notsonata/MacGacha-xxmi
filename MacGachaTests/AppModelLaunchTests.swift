@@ -67,6 +67,43 @@ struct AppModelLaunchTests {
         #expect(other == original)
     }
 
+    @Test func surroundFallbackNoteIsExposedForTheFooter() async throws {
+        let fixture = try LaunchModelFixture(); defer { fixture.remove() }
+        await fixture.model.handleLaunch(.note(.surroundUnavailable), id: "genshin")
+        #expect(fixture.model.launchNotes["genshin"] == .surroundUnavailable)
+        #expect(fixture.model.launchNotes["zzz"] == nil)
+    }
+
+    @Test func surroundPreferencePersistsOnlyForItsEdition() async throws {
+        let fixture = try LaunchModelFixture(); defer { fixture.remove() }
+        let model = fixture.model
+        #expect(!model.surroundSound(for: "genshin"))
+        try model.setSurroundSound(true, for: "genshin")
+        try await model.flushLaunchSettings()
+        #expect(model.surroundSound(for: "genshin"))
+        #expect(!model.surroundSound(for: "genshin-cn"))
+        let persisted = try await BlockingIO.run { try LaunchSettingsStore(paths: fixture.paths).load("genshin") }
+        #expect(persisted.surroundSound)
+        #expect(persisted.backend == .d3dmetal)
+        try model.setSurroundSound(false, for: "genshin")
+        try await model.flushLaunchSettings()
+        #expect(!model.surroundSound(for: "genshin"))
+    }
+
+    @Test func gameModeDefaultOnPersistsWithoutChangingOtherLaunchSettings() async throws {
+        let fixture = try LaunchModelFixture(); defer { fixture.remove() }
+        await fixture.model.reattachOnStart()
+        #expect(fixture.model.gameModeEnabled)
+        fixture.model.gameModeEnabled = false
+        fixture.model.sessionLogsEnabled = false
+        try await fixture.model.flushLaunchSettings()
+        let next = fixture.makeModel()
+        await next.reattachOnStart()
+        #expect(!next.gameModeEnabled)
+        #expect(!next.sessionLogsEnabled)
+        #expect(next.launchSettings(for: "genshin") == .defaults(for: "genshin"))
+    }
+
     @Test func sessionLogsDefaultOnAndRoundTrip() async throws {
         let fixture = try LaunchModelFixture(); defer { fixture.remove() }
         await fixture.model.reattachOnStart()
@@ -448,6 +485,7 @@ private final class StartupGameServices: GameServices, Sendable {
     func start() async { observed.withLock { $0.append("start") }
     }
     func waitUntilIdle(_ id: String) async throws {}
+    func checkForUpdate(_ id: String) async throws -> GameStatus { await status(id) }
     func status(_ id: String) async -> GameStatus { await backend.status(id) }
     func record(_ id: String) async throws -> GameRecord? { try await backend.record(id) }
     func estimate(_ id: String, voices: Set<String>, at location: URL) async throws -> GameEstimate {

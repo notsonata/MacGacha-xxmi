@@ -88,6 +88,20 @@ import RuntimeManager
         #expect(!model.isBusyForUpdates)
     }
 
+    @Test func zzzModOperationsBlockUpdateRelaunch() async throws {
+        let model = AppModel(paths: AppPaths(root: URL(fileURLWithPath: "/inert/zzz-updates")),
+            manifest: try RuntimeManifest(components: []), services: PreviewRuntimeServices(), defaults: nil)
+        await model.start()
+        #expect(!model.isBusyForUpdates)
+        for activity: ModSupportActivity in [.installing, .importing, .moving] {
+            model.modSupportActivities["zzz"] = activity
+            #expect(model.isModSupportBusy)
+            #expect(model.isBusyForUpdates)
+        }
+        model.modSupportActivities["zzz"] = nil
+        #expect(!model.isBusyForUpdates)
+    }
+
     @Test func debugConfigurationNeverStartsSparkle() {
         #if DEBUG
         #expect(!SparkleUpdaterService.permitsStartup(environment: [:], testBundleLoaded: false))

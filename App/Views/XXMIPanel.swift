@@ -6,7 +6,8 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 /// Manages the bundled XXMI compatibility package and the user's mod library.
-/// Only Global Star Rail is verified; every other selection explains why it is unavailable.
+/// Every supported game has its own package, settings and mod library; other
+/// selections explain why they are unavailable.
 struct XXMIPanel: View {
     @Environment(AppModel.self) private var model
     let gameID: String
@@ -27,18 +28,21 @@ struct XXMIPanel: View {
                 ContentUnavailableView {
                     Label("XXMI is not available for this game", systemImage: "wrench")
                 } description: {
-                    Text("XXMI mod support is available for Honkai: Star Rail (Global) on the D3DMetal runtime. It is not available for \(game.name), and this game will never be modified.")
+                    Text("XXMI mod support is available for Global Honkai: Star Rail and Zenless Zone Zero on the D3DMetal runtime. It is not available for \(game.name), and this game will never be modified.")
                 }
             }
         }
         .navigationTitle("XXMI")
         .task {
             guard AppModel.supportsModSupport(gameID: gameID) else { return }
-            await model.refreshModSupport()
+            await model.refreshModSupport(gameID: gameID)
+        }
+        .task(id: model.launchState(for: gameID)) {
+            await model.refreshModLiveApplyEligibility(gameID: gameID)
         }
         .confirmationDialog("Enable mod injection?", isPresented: $confirmingRisk) {
             Button("Enable Mods", role: .destructive) {
-                model.setModSupportInjection(true, acknowledgingRisk: true)
+                model.setModSupportInjection(true, acknowledgingRisk: true, gameID: gameID)
             }
             Button("Cancel", role: .cancel) {}
         } message: {
@@ -46,7 +50,7 @@ struct XXMIPanel: View {
         }
         .confirmationDialog(removalTitle, isPresented: removalBinding) {
             Button("Remove Mod", role: .destructive) {
-                if let mod = pendingRemoval { model.removeModSupport(mod.id) }
+                if let mod = pendingRemoval { model.removeModSupport(mod.id, gameID: gameID) }
                 pendingRemoval = nil
             }
             Button("Cancel", role: .cancel) { pendingRemoval = nil }
@@ -57,21 +61,26 @@ struct XXMIPanel: View {
 
     private var supportedContent: some View {
         Group {
-            if model.modSupportSnapshot == nil, model.modSupportViewState == .loading {
+            if model.modSupportSnapshot(for: gameID) == nil,
+                model.modSupportViewState(for: gameID) == .loading {
                 ProgressView("Checking XXMI…")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if case .failed(let message) = model.modSupportViewState, model.modSupportSnapshot == nil {
+            } else if case .failed(let message) = model.modSupportViewState(for: gameID),
+                model.modSupportSnapshot(for: gameID) == nil {
                 ContentUnavailableView {
                     Label("XXMI could not be checked", systemImage: "exclamationmark.triangle")
                 } description: {
                     Text(message)
                 } actions: {
-                    Button("Try Again") { Task { await model.refreshModSupport() } }
+                    Button("Try Again") { Task { await model.refreshModSupport(gameID: gameID) } }
                 }
             } else {
                 Form {
                     packageSection
                     injectionSection
+                    if model.canApplyModsToRunningGame(gameID: gameID) {
+                        runningGameSection
+                    }
                     folderSection
                     modsSection
                 }
@@ -85,16 +94,16 @@ struct XXMIPanel: View {
     private var packageSection: some View {
         Section {
             LabeledContent("Installed") {
-                Text(model.modSupportInstalledVersion ?? String(localized: "Not installed"))
-                    .foregroundStyle(model.modSupportInstalledVersion == nil ? .secondary : .primary)
+                Text(model.modSupportInstalledVersion(for: gameID) ?? String(localized: "Not installed"))
+                    .foregroundStyle(model.modSupportInstalledVersion(for: gameID) == nil ? .secondary : .primary)
                     .monospacedDigit()
             }
             LabeledContent("Available") {
-                Text(model.modSupportAvailableVersion ?? String(localized: "Built-in package unavailable"))
+                Text(model.modSupportAvailableVersion(for: gameID) ?? String(localized: "Built-in package unavailable"))
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
             }
-            if let activity = model.modSupportActivity {
+            if let activity = model.modSupportActivity(for: gameID) {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
                     Text(activityLabel(activity))
@@ -103,25 +112,25 @@ struct XXMIPanel: View {
                 .accessibilityElement(children: .combine)
                 .accessibilityLabel(activityLabel(activity))
             }
-            if let error = model.modSupportError {
+            if let error = model.modSupportError(for: gameID) {
                 Label(error, systemImage: "exclamationmark.triangle.fill")
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             HStack(spacing: 8) {
-                if model.modSupportSnapshot?.isInstalled == true {
-                    Button("Repair") { model.repairBundledModSupport() }
-                    if model.modSupportAvailableVersion != nil,
-                        model.modSupportAvailableVersion != model.modSupportInstalledVersion {
-                        Button("Update") { model.updateBundledModSupport() }
+                if model.modSupportSnapshot(for: gameID)?.isInstalled == true {
+                    Button("Repair") { model.repairBundledModSupport(gameID: gameID) }
+                    if model.modSupportAvailableVersion(for: gameID) != nil,
+                        model.modSupportAvailableVersion(for: gameID) != model.modSupportInstalledVersion(for: gameID) {
+                        Button("Update") { model.updateBundledModSupport(gameID: gameID) }
                     }
                 } else {
-                    Button("Install") { model.installBundledModSupport() }
+                    Button("Install") { model.installBundledModSupport(gameID: gameID) }
                 }
                 Button("Import Package…") { choosePackage() }
                 Spacer()
             }
-            .disabled(model.isModSupportBusy)
+            .disabled(model.isModSupportBusy(for: gameID))
         } header: {
             Text("Package")
         } footer: {
@@ -134,17 +143,25 @@ struct XXMIPanel: View {
     private var injectionSection: some View {
         Section {
             Toggle("Inject XXMI on next launch", isOn: injectionBinding)
-                .disabled(model.isModSupportBusy
-                    || (model.modSupportSnapshot?.isInstalled != true && model.modSupportSnapshot?.injectionEnabled != true))
+                .disabled(model.isModSupportBusy(for: gameID)
+                    || (model.modSupportSnapshot(for: gameID)?.isInstalled != true
+                        && model.modSupportSnapshot(for: gameID)?.injectionEnabled != true))
                 .help("Mod injection applies to the next launch, not a running game")
-            if model.modSupportSnapshot?.injectionEnabled == true,
-                model.modSupportSnapshot?.isInstalled != true {
+            if model.modSupportSnapshot(for: gameID)?.injectionEnabled == true,
+                model.modSupportSnapshot(for: gameID)?.isInstalled != true {
                 Label("Injection is on, but the package is not installed. The game will not start until XXMI is installed or injection is turned off.",
                     systemImage: "exclamationmark.triangle.fill")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
-            if model.modSupportNeedsRiskAcknowledgment {
+            if model.modSupportSnapshot(for: gameID)?.injectionEnabled == true,
+                model.modSupportRuntimeIneligible(for: gameID) {
+                Label("Mods work only with D3DMetal on Wine 11.20 with D3DMetal 4.0b3. Newer recommended Wine versions are not verified for mods, so the game will not start with injection on. Choose that version in Dependencies, or turn injection off.",
+                    systemImage: "exclamationmark.triangle.fill")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+            if model.modSupportNeedsRiskAcknowledgment(for: gameID) {
                 Text("Turning injection on asks for a ban-risk acknowledgment first. Mods are off until you enable them.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -156,20 +173,48 @@ struct XXMIPanel: View {
         }
     }
 
+    // MARK: - Running game
+
+    /// Offered only while a session launched with injection is running. The
+    /// update is a manual action; nothing watches the library or sends keys.
+    private var runningGameSection: some View {
+        Section {
+            HStack(spacing: 8) {
+                Button("Apply Mods to Running Game") { model.applyModsToRunningGame(gameID: gameID) }
+                    .disabled(model.isModSupportBusy(for: gameID))
+                Spacer()
+            }
+            if model.showsModLiveApplyPrompt(gameID: gameID) {
+                HStack(alignment: .top, spacing: 8) {
+                    Label("Mods were copied to the running game. Switch to the game and press F10 (fn+F10 on a Mac keyboard) to reload them.",
+                        systemImage: "keyboard")
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 8)
+                    Button("Dismiss") { model.dismissModLiveApplyPrompt(gameID: gameID) }
+                        .buttonStyle(.borderless)
+                }
+            }
+        } header: {
+            Text("Running Game")
+        } footer: {
+            Text("Copies your enabled mods into the running game. Nothing changes in game until you reload mods there; don't press F10 while MacGacha is applying. Editing the library alone only affects the next launch.")
+        }
+    }
+
     // MARK: - Folder
 
     private var folderSection: some View {
         Section {
             LabeledContent("Mods Folder") {
-                Text(model.modSupportModsDirectory?.path ?? String(localized: "Not available"))
-                    .foregroundStyle(model.modSupportModsDirectory == nil ? .secondary : .primary)
+                Text(model.modSupportModsDirectory(for: gameID)?.path ?? String(localized: "Not available"))
+                    .foregroundStyle(model.modSupportModsDirectory(for: gameID) == nil ? .secondary : .primary)
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .textSelection(.enabled)
             }
             HStack(spacing: 8) {
                 Button("Move Mods Folder…") { chooseModsFolderDestination() }
-                    .disabled(model.isModSupportBusy)
+                    .disabled(model.isModSupportBusy(for: gameID))
                 Spacer()
             }
         } header: {
@@ -198,9 +243,9 @@ struct XXMIPanel: View {
                     .font(.callout)
             } else {
                 ForEach(mods) { mod in
-                    ModRow(mod: mod, busy: model.isModSupportBusy,
-                        onToggle: { model.setModSupportEnabled(mod.id, enabled: $0) },
-                        onReveal: { model.revealModSupportMod(mod.id) },
+                    ModRow(mod: mod, busy: model.isModSupportBusy(for: gameID),
+                        onToggle: { model.setModSupportEnabled(mod.id, enabled: $0, gameID: gameID) },
+                        onReveal: { model.revealModSupportMod(mod.id, gameID: gameID) },
                         onRemove: { pendingRemoval = mod })
                 }
             }
@@ -208,13 +253,13 @@ struct XXMIPanel: View {
             HStack {
                 Text("Mods")
                 Spacer()
-                Button("Show Mods Folder") { model.revealModSupportFolder() }
+                Button("Show Mods Folder") { model.revealModSupportFolder(gameID: gameID) }
                     .buttonStyle(.link)
                     .accessibilityLabel("Show Mods Folder in Finder")
-                Button("Refresh") { model.rescanModSupportLibrary() }
-                    .disabled(model.isModSupportBusy)
+                Button("Refresh") { model.rescanModSupportLibrary(gameID: gameID) }
+                    .disabled(model.isModSupportBusy(for: gameID))
                 Button("Import…") { chooseMod() }
-                    .disabled(model.isModSupportBusy)
+                    .disabled(model.isModSupportBusy(for: gameID))
             }
         } footer: {
             Text("Enabled mods are copied into each new launch, so editing or removing them never changes a running game. Only mod folders and ZIP archives are accepted.")
@@ -222,7 +267,7 @@ struct XXMIPanel: View {
     }
 
     private var mods: [ManagedMod] {
-        model.filteredModSupportMods(matching: searchText)
+        model.filteredModSupportMods(matching: searchText, gameID: gameID)
     }
 
     private var dropZone: some View {
@@ -240,8 +285,9 @@ struct XXMIPanel: View {
             }
             .frame(height: 56)
             .dropDestination(for: URL.self) { urls, _ in
-                guard !model.isModSupportBusy, urls.count == 1, let url = urls.first else { return false }
-                model.importModSupport(from: url)
+                guard !model.isModSupportBusy(for: gameID), urls.count == 1,
+                    let url = urls.first else { return false }
+                model.importModSupport(from: url, gameID: gameID)
                 return true
             } isTargeted: { isDropTargeted = $0 }
             .accessibilityElement(children: .combine)
@@ -254,13 +300,13 @@ struct XXMIPanel: View {
 
     private var injectionBinding: Binding<Bool> {
         Binding(
-            get: { model.modSupportSnapshot?.injectionEnabled ?? false },
+            get: { model.modSupportSnapshot(for: gameID)?.injectionEnabled ?? false },
             set: { enabled in
-                guard !model.isModSupportBusy else { return }
-                if enabled, model.modSupportNeedsRiskAcknowledgment {
+                guard !model.isModSupportBusy(for: gameID) else { return }
+                if enabled, model.modSupportNeedsRiskAcknowledgment(for: gameID) {
                     confirmingRisk = true
                 } else {
-                    model.setModSupportInjection(enabled, acknowledgingRisk: false)
+                    model.setModSupportInjection(enabled, acknowledgingRisk: false, gameID: gameID)
                 }
             }
         )
@@ -285,6 +331,7 @@ struct XXMIPanel: View {
         case .saving: String(localized: "Saving changes…")
         case .moving: String(localized: "Moving mods folder…")
         case .refreshing: String(localized: "Refreshing Mods…")
+        case .applyingLive: String(localized: "Applying mods to the running game…")
         }
     }
 
@@ -297,21 +344,23 @@ struct XXMIPanel: View {
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
         panel.allowedContentTypes = [.folder] + [UTType(filenameExtension: "zip")].compactMap { $0 }
-        if panel.runModal() == .OK, let url = panel.url { model.importModSupport(from: url) }
+        if panel.runModal() == .OK, let url = panel.url { model.importModSupport(from: url, gameID: gameID) }
     }
 
     private func chooseModsFolderDestination() {
         let panel = NSOpenPanel()
         panel.title = String(localized: "Move Mods Folder")
         panel.prompt = String(localized: "Move Here")
-        panel.message = String(localized: "Choose where to create the mods folder. MacGacha-HSR-Mods is added inside it.")
+        let folderName = ModSupportProfile.find(gameID: gameID)?.suggestedLibraryFolderName
+            ?? "MacGacha-Mods"
+        panel.message = String(localized: "Choose where to create the mods folder. \(folderName) is added inside it.")
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
         panel.canCreateDirectories = true
         panel.allowsMultipleSelection = false
         if panel.runModal() == .OK, let parent = panel.url {
-            let destination = parent.appendingPathComponent("MacGacha-HSR-Mods", isDirectory: true)
-            model.moveModSupportDirectory(to: destination)
+            let destination = parent.appendingPathComponent(folderName, isDirectory: true)
+            model.moveModSupportDirectory(to: destination, gameID: gameID)
         }
     }
 
@@ -319,11 +368,13 @@ struct XXMIPanel: View {
         let panel = NSOpenPanel()
         panel.title = String(localized: "Import XXMI Package")
         panel.prompt = String(localized: "Choose")
-        panel.message = String(localized: "Choose a folder containing manifest.json and hsr-srmi.zip.")
+        panel.message = String(localized: "Choose the folder containing the XXMI package manifest and ZIP archive.")
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
-        if panel.runModal() == .OK, let url = panel.url { model.importModSupportPackage(from: url) }
+        if panel.runModal() == .OK, let url = panel.url {
+            model.importModSupportPackage(from: url, gameID: gameID)
+        }
     }
 }
 

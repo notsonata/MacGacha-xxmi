@@ -7,7 +7,7 @@ import LauncherCore
 /// and verified file copies stay in this prefix; no certificates are installed.
 /// Shares PrefixManager's lock so initialization and preparation cannot overlap.
 public struct LaunchPreparation: Sendable {
-    public static let provisioningRevision = 2
+    public static let provisioningRevision = 3
     private let paths: AppPaths
     private let runner: any ProcessRunner
     private let inspector: any ProcessInspector
@@ -68,7 +68,7 @@ public struct LaunchPreparation: Sendable {
         try PrefixShellFolders.validate(in: prefixFS)
         try PrefixShellFolders.requireIdle(prefix: prefix, prefixFS: prefixFS, wineBinary: binary, runtimeRoot: paths.runtimes, inspector: inspector, serverProbe: serverProbe)
         try PrefixShellFolders.repair(in: prefixFS)
-        let environment = ["WINEPREFIX": prefix.path, "WINEDEBUG": "-all", "LC_ALL": "C"]
+        let environment = PrefixManager.preparationEnvironment(prefix: prefix)
         let needsProvisioning = (marker.provisioningRevision ?? 0) < Self.provisioningRevision
         if needsProvisioning {
             try await run(binary, ["reg", "add", Self.internetSettings, "/v", "ProxyEnable", "/t", "REG_DWORD", "/d", "0", "/f"], environment)
@@ -82,6 +82,11 @@ public struct LaunchPreparation: Sendable {
             }
         }
         try await run(binary, ["reg", "add", "HKCU\\Software\\Wine\\Mac Driver", "/v", "RetinaMode", "/t", "REG_SZ", "/d", request.retina ? "y" : "n", "/f"], environment)
+        // Apply per launch even to an already prepared prefix. The persistence
+        // barrier below must succeed before launch or revision publication.
+        if let version = request.windowsVersion {
+            try await run(binary, ["reg", "add", "HKCU\\Software\\Wine", "/v", "Version", "/t", "REG_SZ", "/d", version.rawValue, "/f"], environment)
+        }
         if let shim = request.steamShim {
             let source = try ContainedFileSystem(root: shim)
             for (name, destination, optional) in [

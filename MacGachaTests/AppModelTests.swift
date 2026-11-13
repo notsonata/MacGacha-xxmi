@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // MacGacha — https://github.com/deruta74/MacGacha — see LICENSE and NOTICE (additional term under GPL section 7(b)).
 import Foundation
+import Observation
 import Synchronization
 import Testing
 import LauncherCore
@@ -12,6 +13,46 @@ import HoYoPlayAPI
 @Suite(.serialized)
 @MainActor
 struct AppModelTests {
+    @Test func runtimeCategoriesUseTypedPurposeAndKeepHistoricalVersionsTogether() {
+        func row(_ id: String, kind: ComponentKind? = nil, backend: RuntimeBackend? = nil) -> RuntimeRow {
+            RuntimeRow(id: id, kindName: "Localized title", version: id, licenseName: "Test", state: .notInstalled,
+                canImportGPTK: false, needsConsent: false, componentKind: kind, backend: backend)
+        }
+        let rows = [row("dxmt-old", backend: .dxmt), row("surround-old", kind: .surroundAudio),
+            row("metal", backend: .d3dmetal), row("dxmt-new", backend: .dxmt), row("jadeite", kind: .jadeite),
+            row("steam", kind: .steamShim), row("crypt32", kind: .crypt32Fix), row("fps", kind: .genshinFps),
+            row("surround-new", kind: .surroundAudio), row("unknown")]
+        let groups = RuntimeVersionGroup.group(rows)
+        #expect(groups.count == 8)
+        #expect(groups.first?.rows.map(\.id) == ["dxmt-old", "dxmt-new"])
+        #expect(groups.filter { $0.category == .runtimes }.count == 2)
+        #expect(groups.filter { $0.category == .compatibility }.count == 3)
+        #expect(groups.filter { $0.category == .extras }.count == 3)
+        #expect(groups.flatMap(\.rows).count == rows.count)
+    }
+
+    @Test func dependencyStatusFollowsSelectionRecommendationAndWork() {
+        func row(_ id: String, _ state: RowState) -> RuntimeRow {
+            RuntimeRow(id: id, kindName: "Surround", version: id, licenseName: "Test", state: state,
+                canImportGPTK: false, needsConsent: false, componentKind: .surroundAudio)
+        }
+        let installed = RowState.installed(source: .download)
+        func status(_ rows: [RuntimeRow], selected: String?, recommended: String = "new", catalog: Bool = true) -> RuntimeVersionGroup.Status {
+            RuntimeVersionGroup.group(rows)[0].status(selected: { $0 == selected }, recommended: { $0 == recommended }, hasCatalog: catalog)
+        }
+        let old = row("old", installed), new = row("new", .notInstalled)
+        #expect(status([old, new], selected: "old") == .updateAvailable(active: old, recommended: new))
+        #expect(status([old, row("new", installed)], selected: "new") == .ready(row("new", installed)))
+        #expect(status([old, new], selected: "new") == .notInstalled(new))
+        #expect(status([row("old", .notInstalled), new], selected: nil) == .notInstalled(new))
+        #expect(status([old, new], selected: nil, recommended: "", catalog: false) == .ready(old))
+        let failed = row("new", .failed(message: "Network"))
+        #expect(status([old, failed], selected: "new") == .failed(failed, message: "Network"))
+        let working = row("new", .working(phase: .staging, fraction: 0.5))
+        #expect(status([old, working], selected: "old") == .working(working))
+        #expect(status([row("bad", .invalid(reason: "Missing", removable: true))], selected: nil) == .damaged)
+    }
+
     @Test func recoveryDeferredCleanupStillLoadsInstalledRuntimeRows() async throws {
         let (model, fake, component) = try fixture()
         fake.setInstalled(try InstalledComponent(kind: component.kind, version: component.version.rawValue,
@@ -344,7 +385,21 @@ struct AppModelTests {
         let url = try #require(Bundle.main.url(forResource: "runtime-manifest", withExtension: "json"))
         let manifest = try JSONDecoder().decode(RuntimeManifest.self, from: Data(contentsOf: url))
         #expect(manifest.schemaVersion == 3)
-        #expect(manifest.components.count == 7)
+        #expect(manifest.components.count == 13)
+        let fps = try #require(manifest.components.first { $0.id.rawValue == GenshinFps.componentID })
+        #expect(fps.kind == .genshinFps && fps.archive == .zip)
+        #expect(fps.license.name == "GPL-3.0-only" && fps.license.redistributable && fps.consent == nil)
+        #expect(fps.rootPath == (try SafeRelativePath("x86_64-windows")))
+        #expect(fps.size == 223498 && fps.installedSize == 220658)
+        #expect(fps.sha256?.hex == "f2fa38aef5ffdcf15aa3480f7acc608cb9266bdcae0af05c4e9802e611671abb")
+        #expect(fps.url?.absoluteString == "https://github.com/deruta74/MacGacha/releases/download/genshin-fps-unlock-2/genshin-fps-unlock-2.zip")
+        #expect(manifest.bundles.allSatisfy { !$0.components.contains(fps.id) })
+        let surroundHistory = manifest.components.filter { $0.kind == .surroundAudio }
+        #expect(surroundHistory.map(\.id.rawValue) == [SurroundAudio.componentID, "surround-audio-wine-11.20-2", "surround-audio-wine-11.20-1"])
+        let surround = try #require(manifest.components.first { $0.id.rawValue == SurroundAudio.componentID })
+        #expect(surround.kind == .surroundAudio && surround.archive == .zip)
+        #expect(surround.license.name == "LGPL-2.1-or-later" && surround.license.redistributable)
+        #expect(manifest.bundles.allSatisfy { !$0.components.contains(surround.id) })
         let crypt32 = try #require(manifest.components.first { $0.id.rawValue == Crypt32Fix.componentID })
         #expect(crypt32.kind == .crypt32Fix && crypt32.archive == .zip)
         #expect(crypt32.license.name == "LGPL-2.1-or-later" && crypt32.license.redistributable)
@@ -363,8 +418,8 @@ struct AppModelTests {
         let manifest = try RuntimeManifest.load(from: url)
         let model = AppModel(paths: testPaths(), manifest: manifest, services: PreviewRuntimeServices(), defaults: nil)
         await model.start()
-        #expect(model.rows.map(\.id) == manifest.bundles.map { $0.id.rawValue } + ["jadeite-4.1.0", "steam-shim-proton-10.0-4", Crypt32Fix.componentID])
-        #expect(manifest.bundles.first?.id.rawValue == "dxmt-wine11.0cx-dxmt0.80")
+        #expect(model.rows.map(\.id) == manifest.bundles.map { $0.id.rawValue } + manifest.components.filter { [.jadeite, .steamShim, .crypt32Fix, .surroundAudio, .genshinFps].contains($0.kind) }.map { $0.id.rawValue })
+        #expect(manifest.bundles.first?.id.rawValue == "dxmt-wine11.20mg1.0-dxmt0.80")
         #expect(model.rows.contains { $0.id == "dxmt-wine11.0-dxmt0.80" })
         let dxmt = manifest.bundles[0].id.rawValue
         model.install(dxmt)
@@ -400,6 +455,34 @@ struct AppModelTests {
             await model.remove(id)
             #expect(model.rows.first { $0.id == id }?.state == .notInstalled)
         }
+    }
+
+    @Test(.timeLimit(.minutes(1))) func genshinFpsRowInstallsRefreshesAndRemovesWithoutChangingReadiness() async throws {
+        let url = try #require(Bundle.main.url(forResource: "runtime-manifest", withExtension: "json"))
+        let manifest = try RuntimeManifest.load(from: url), services = PreviewRuntimeServices()
+        let model = AppModel(paths: testPaths(), manifest: manifest, services: services, defaults: nil)
+        await model.start()
+        let row = try #require(model.rows.first { $0.id == GenshinFps.componentID })
+        let plans = GameDefinition.all.map { model.runtimeSetupPlan(for: $0.id) }
+        #expect(plans.allSatisfy { $0?.items.contains { $0.id == GenshinFps.componentID } != true })
+        #expect(row.kindName == String(localized: "Genshin FPS unlocker"))
+        #expect(row.licenseName == "GPL-3.0-only" && row.downloadSize == 223498)
+        #expect(!row.needsConsent && !row.canImportGPTK)
+        model.install(GenshinFps.componentID)
+        let changes = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        defer { changes.continuation.finish() }
+        var iterator = changes.stream.makeAsyncIterator()
+        while model.rows.first(where: { $0.id == GenshinFps.componentID })?.state != .installed(source: .download) {
+            withObservationTracking { _ = model.rows } onChange: { changes.continuation.yield(()) }
+            _ = await iterator.next()
+        }
+        await model.refreshRuntimes()
+        #expect(model.rows.filter { $0.id == GenshinFps.componentID }.count == 1)
+        #expect(model.rows.first { $0.id == GenshinFps.componentID }?.state == .installed(source: .download))
+        #expect(!model.runtimesReady)
+        #expect(GameDefinition.all.map { model.runtimeSetupPlan(for: $0.id) } == plans)
+        await model.remove(GenshinFps.componentID)
+        #expect(model.rows.first { $0.id == GenshinFps.componentID }?.state == .notInstalled)
     }
 
     @Test func progressIsThrottledAndPreviewHasNoLiveDependencies() async throws {
@@ -498,6 +581,24 @@ private func eventually(_ condition: () -> Bool, timeout: Duration = .seconds(5)
 }
 
 final class FakeRuntimeServices: RuntimeServices, Sendable {
+    func stageDependency(_ update: RuntimeAutomaticUpdate, manifest: RuntimeManifest, importedFrom: RuntimeBundle?,
+        progress: @escaping @Sendable (OperationEvent) -> Void) async throws -> DependencyStagingHandle {
+        let stream: RuntimeInstallStream
+        if let bundle = manifest.bundles.first(where: { $0.id == update.targetID }) {
+            if let importedFrom { stream = install(bundle, manifest: manifest, carryingImportedFrameworkFrom: importedFrom) }
+            else { stream = install(bundle, manifest: manifest, from: nil) }
+        } else if let component = manifest.component(id: update.targetID) { stream = RuntimeInstallStream(install(component, from: nil)) }
+        else { throw LauncherError.io("Unknown synthetic staging target") }
+        for try await event in stream {
+            switch event {
+            case .phase(.completed): return DependencyStagingHandle(publish: {}, discard: {})
+            case .phase(.cancelled): throw LauncherError.cancelled
+            case .failed(let error): throw error
+            default: progress(event)
+            }
+        }
+        throw LauncherError.cancelled
+    }
     struct Install: Sendable { let component: RuntimeComponent; let candidate: GPTKCandidate? }
     struct State: Sendable {
         var accepted = false
@@ -505,6 +606,7 @@ final class FakeRuntimeServices: RuntimeServices, Sendable {
         var calls: [String] = []
         var installs: [Install] = []
         var bundleInstalls: [String] = []
+        var carriedImports: [String: String] = [:]
         var components: [InstalledComponent] = []
         var bundles: [String: InstalledRuntimeBundle] = [:]
         var invalid: [InvalidRuntimeEntry] = []
@@ -569,6 +671,10 @@ final class FakeRuntimeServices: RuntimeServices, Sendable {
             state.withLock { $0.bundleInstalls.append(bundle.id.rawValue); $0.continuation = continuation }
             installEvents.continuation.yield(bundle.id.rawValue)
         })
+    }
+    func install(_ bundle: RuntimeBundle, manifest: RuntimeManifest, carryingImportedFrameworkFrom previous: RuntimeBundle) -> RuntimeInstallStream {
+        state.withLock { $0.carriedImports[bundle.id.rawValue] = previous.id.rawValue }
+        return install(bundle, manifest: manifest, from: nil)
     }
     func remove(_ c: InstalledComponent) async throws {
         try state.withLock {

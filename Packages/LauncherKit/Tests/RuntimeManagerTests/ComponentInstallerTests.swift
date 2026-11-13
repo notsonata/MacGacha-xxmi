@@ -177,6 +177,10 @@ func installerStoreLockIsHeldAndDiscardReleasesIt() async throws {
             catch LauncherError.busy { try await Task.sleep(for: .milliseconds(10)) }
         }
         try #require(released)
+        // The store lock is the outermost lock: once it is free, the session's
+        // component pins must already be free, or an immediate retry is busy.
+        let pins = try RuntimeStore.componentLocks(paths: AppPaths(root: temp.url), componentIDs: [c.id.rawValue], mode: .exclusive)
+        withExtendedLifetime(pins) {}
     }
     for try await _ in installer.install(c) { }
     #expect(cdn.requestLog.count == 1)
@@ -258,6 +262,10 @@ func cancellingInstallerCancelsNetworkAndReleasesStoreLock(point: String) async 
 }
 
 private final class InstallerStalledHTTP: HTTPClient {
+    func post(_ url: URL) async throws -> (HTTPResponseHead, HTTPBody) {
+        throw LauncherError.io("Unexpected POST")
+    }
+
     private let body: Data?
     private let started = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
     private let cancellation = Mutex(false)

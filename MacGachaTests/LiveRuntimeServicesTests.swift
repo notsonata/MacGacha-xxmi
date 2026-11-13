@@ -6,6 +6,7 @@ import Testing
 import LauncherCore
 import DownloadEngine
 import RuntimeManager
+import Launch
 @testable import MacGacha
 
 @Suite(.serialized)
@@ -59,7 +60,12 @@ struct LiveRuntimeServicesTests {
             retry: RetryPolicy(maxAttempts: 1))
         let manifest = try liveBundleManifest(version: "1", bytes: bytes)
         let bundle = manifest.bundles[0]
-        for try await _ in live.install(bundle, manifest: manifest, from: nil) { }
+        for try await event in live.install(bundle, manifest: manifest, from: nil) {
+            if event == .phase(.completed) {
+                let pin = try RuntimePin.pin(paths: AppPaths(root: root.appendingPathComponent("app")), componentIDs: bundle.components.map(\.rawValue))
+                withExtendedLifetime(pin) {}
+            }
+        }
         #expect(try await live.scanBundles(manifest)[bundle.id.rawValue] != nil)
         let update = try liveBundleManifest(version: "2", bytes: bytes)
         let finished = Mutex(false)
@@ -272,6 +278,10 @@ struct LiveRuntimeServicesTests {
 }
 
 private struct FailedHTTP: HTTPClient {
+    func post(_ url: URL) async throws -> (HTTPResponseHead, HTTPBody) {
+        throw LauncherError.io("Unexpected POST")
+    }
+
     var error = LauncherError.transport("connection failed token=planted-secret")
     func get(_ url: URL, byteRangeFrom offset: Int64?) async throws -> (HTTPResponseHead, HTTPBody) {
         #expect(!onMainThread())
@@ -296,6 +306,10 @@ private actor LiveTestGate {
 }
 
 private final class CleanupHeldHTTP: HTTPClient, Sendable {
+    func post(_ url: URL) async throws -> (HTTPResponseHead, HTTPBody) {
+        throw LauncherError.io("Unexpected POST")
+    }
+
     let bytes: Data
     let started = LiveTestGate(), cancelled = LiveTestGate(), release = LiveTestGate()
     init(bytes: Data) { self.bytes = bytes }

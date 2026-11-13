@@ -5,12 +5,110 @@ import Foundation
 import Synchronization
 import Testing
 import LauncherCore
-import DownloadEngine
+@testable import DownloadEngine
 import Sophon
 import TestSupport
 @testable import GameLibrary
 
 @Suite(.serialized, .timeLimit(.minutes(1))) struct GameLibraryTests {
+    @Test(arguments: ["patch-2", "release-day-patch"])
+    func normalUpdateUsesGameAndInstalledVoicePatchRecipes(patchID: String) async throws {
+        let f = try LibraryFixture(); try f.advertise(1); try await f.installGame()
+        try f.advertise(2, enableLdiff: true, diffTags: ["1.0"], changedVoices: true)
+        try f.advertisePatches(changedVoices: true, patchID: patchID)
+        let start = f.cdn.requestLog.count
+        #expect(try await libraryCollect(await f.library.update(game, approved: true)).last == .phase(.completed))
+        let requests = f.cdn.requestLog.dropFirst(start).map(\.path)
+        #expect(requests.contains("downloader/sophon_chunk/api/getPatchBuild"))
+        #expect(Set(requests.filter { $0.hasPrefix("patch-manifests/") }) == ["patch-manifests/base", "patch-manifests/extra", "patch-manifests/voice"])
+        #expect(Set(requests.filter { $0.hasPrefix("diffs/") }) == ["diffs/base", "diffs/voice"])
+        #expect(!requests.contains { $0.hasPrefix("chunks/") })
+        for (path, body) in syntheticFiles(2, changedVoices: true) {
+            #expect(try f.fs.readFile(at: SafeRelativePath(path), maxBytes: 100) == Data(body.utf8))
+        }
+        #expect(try await f.store.load(game.id)?.installed?.tag == "2.0")
+    }
+
+    @Test(arguments: [false, true]) func normalUpdateRequiresBothLdiffGates(enableLdiff: Bool) async throws {
+        let f = try LibraryFixture(); try f.advertise(1); try await f.installGame()
+        try f.advertise(2, enableLdiff: enableLdiff, diffTags: enableLdiff ? ["0.9"] : ["1.0"])
+        let start = f.cdn.requestLog.count
+        #expect(try await libraryCollect(await f.library.update(game, approved: true)).last == .phase(.completed))
+        #expect(!f.cdn.requestLog.dropFirst(start).contains { $0.path.hasSuffix("getPatchBuild") })
+        try f.assertFiles(2)
+    }
+
+    @Test(arguments: ["build", "voice", "tag", "build-id", "missing-voice"])
+    func unavailablePatchMetadataUsesChunkUpdate(failure: String) async throws {
+        let f = try LibraryFixture(); try f.advertise(1); try await f.installGame()
+        try f.advertise(2, enableLdiff: true, diffTags: ["1.0"])
+        try f.advertisePatches(tag: failure == "tag" ? "other" : "2.0", buildID: failure == "build-id" ? "other" : "build-2",
+            omitVoice: failure == "missing-voice")
+        if failure == "build" { f.cdn.enqueueFault("downloader/sophon_chunk/api/getPatchBuild", .status(503)) }
+        if failure == "voice" { f.cdn.enqueueFault("patch-manifests/voice", .status(503)) }
+        let start = f.cdn.requestLog.count
+        #expect(try await libraryCollect(await f.library.update(game, approved: true)).last == .phase(.completed))
+        let requests = f.cdn.requestLog.dropFirst(start).map(\.path)
+        #expect(requests.contains { $0.hasSuffix("getPatchBuild") })
+        #expect(requests.contains { $0.hasPrefix("chunks/") })
+        #expect(!requests.contains { $0.hasPrefix("diffs/") })
+        try f.assertFiles(2)
+    }
+
+    @Test func patchUpdateResumeUsesSavedRecipesWithoutMetadata() async throws {
+        let disk = LibraryDisk(), f = try LibraryFixture(disk: disk)
+        try f.advertise(1); try await f.installGame()
+        try f.advertise(2, enableLdiff: true, diffTags: ["1.0"]); try f.advertisePatches()
+        disk.bytes.withLock { $0 = 0 }
+        await #expect(throws: LauncherError.self) { _ = try await libraryCollect(await f.library.update(game, approved: true)) }
+        let plan = try #require(try await f.store.loadPlan(for: game.id))
+        #expect(plan.files.filter { $0.recipe != nil }.count == 2)
+        // A failed source on resume must select the immutable chunk recipe.
+        try f.fs.writeAtomically(Data("modified".utf8), to: SafeRelativePath("GenshinImpact.exe"))
+        disk.bytes.withLock { $0 = Int64.max }
+        let start = f.cdn.requestLog.count
+        let restarted = f.restarted()
+        #expect(try await libraryCollect(await restarted.resume(game, approved: true)).last == .phase(.completed))
+        let requests = f.cdn.requestLog.dropFirst(start).map(\.path)
+        #expect(!requests.contains { $0.contains("api/") || $0.hasPrefix("patch-manifests/") || $0.hasPrefix("manifests/") })
+        #expect(requests.contains { $0.hasPrefix("chunks/") })
+        try f.assertFiles(2)
+    }
+
+    @Test func cancellationDuringPatchDiscoveryDoesNotPublishOrFallBack() async throws {
+        let gate = LibraryRequestGate(pathSuffix: "getPatchBuild"), f = try LibraryFixture(requestGate: gate)
+        try f.advertise(1); try await f.installGame()
+        try f.advertise(2, enableLdiff: true, diffTags: ["1.0"]); try f.advertisePatches()
+        let start = f.cdn.requestLog.count
+        let update = Task { try await libraryCollect(await f.library.update(game, approved: true)) }
+        defer { update.cancel(); gate.release() }
+        try await gate.waitUntilEntered()
+        update.cancel(); gate.release()
+        await #expect(throws: LauncherError.cancelled) { try await update.value }
+        let record = try #require(try await f.store.load(game.id))
+        #expect(record.pending == nil && record.installed?.tag == "1.0")
+        #expect(!f.cdn.requestLog.dropFirst(start).contains { $0.path.hasPrefix("chunks/") || $0.path.hasPrefix("diffs/") })
+    }
+
+    @Test func unavailableLdiffConfigUsesChunkUpdate() async throws {
+        let f = try LibraryFixture(); try f.advertise(1); try await f.installGame()
+        try f.advertise(2, enableLdiff: true, diffTags: ["1.0"])
+        f.cdn.enqueueFault("hyp/hyp-connect/api/getGameConfigs", .status(503))
+        let start = f.cdn.requestLog.count
+        #expect(try await libraryCollect(await f.library.update(game, approved: true)).last == .phase(.completed))
+        #expect(!f.cdn.requestLog.dropFirst(start).contains { $0.path.hasSuffix("getPatchBuild") })
+        try f.assertFiles(2)
+    }
+
+    @Test func voiceChangesUseChunkRouteEvenWhenLdiffIsEligible() async throws {
+        let f = try LibraryFixture(); try f.advertise(1); try await f.installGame()
+        try f.advertise(1, enableLdiff: true, diffTags: ["1.0"])
+        let start = f.cdn.requestLog.count
+        #expect(try await libraryCollect(await f.library.setVoices(game, [])).last == .phase(.completed))
+        #expect(!f.cdn.requestLog.dropFirst(start).contains { $0.path.hasSuffix("getPatchBuild") })
+        #expect(try await f.store.load(game.id)?.installed?.voices.isEmpty == true)
+    }
+
     @Test func fullVerifyEmitsMonotonicByteProgressInsideVerifyingPhase() async throws {
         let f = try LibraryFixture(); try f.advertise(1); try await f.installGame()
         try f.fs.writeAtomically(Data("not part of the manifest".utf8), to: SafeRelativePath("unmanaged.bin"))
@@ -372,6 +470,27 @@ import TestSupport
         let requests = f.cdn.requestLog.dropFirst(before)
         #expect(requests.filter { $0.path == "manifests/v1-base" }.count == 1)
         #expect(!requests.contains { $0.path.hasPrefix("chunks/") })
+    }
+
+    @Test func manualUpdateCheckReadsNewBranchAfterCachedStatus() async throws {
+        let f = try LibraryFixture(); try f.advertise(1); try await f.installGame()
+        #expect(await f.library.status(game) == .installed(tag: "1.0"))
+        let before = f.cdn.requestLog.count
+        try f.advertise(2)
+        #expect(try await f.library.checkForUpdate(game) == .updateAvailable(from: "1.0", to: "2.0"))
+        let requests = f.cdn.requestLog.dropFirst(before)
+        #expect(requests.filter { $0.path == "hyp/hyp-connect/api/getGameBranches" }.count == 1)
+        #expect(!requests.contains { $0.path.contains("build") })
+    }
+
+    @Test func manualUpdateCheckRefusesOfflineBranchFallback() async throws {
+        let f = try LibraryFixture(); try f.advertise(1); try await f.installGame()
+        #expect(await f.library.status(game) == .installed(tag: "1.0"))
+        f.cdn.enqueueFault("hyp/hyp-connect/api/getGameBranches", .transportError)
+        await #expect(throws: LauncherError.transport("delivery request failed")) {
+            _ = try await f.library.checkForUpdate(game)
+        }
+        #expect(try await f.store.load(game.id)?.installed?.tag == "1.0")
     }
 
     @Test func offlineStatusUsesCachedBranch() async throws {
@@ -840,7 +959,7 @@ private struct LibraryFixture: ~Copyable {
         if let requestGate { http = LibraryGatedHTTP(cdn: cdn, gate: requestGate) }
         else if let metadataGate { http = LibraryDelayedHTTP(cdn: cdn, gate: metadataGate) } else { http = cdn }
         library = GameLibrary(paths: paths, api: DeliveryAPI(http: http), runner: OperationRunner(store: store,
-            fetcher: ChunkFetcher(http: cdn, retry: RetryPolicy(maxAttempts: 1), sleeper: InstantSleeper()), disk: disk, log: log), store: store, disk: disk, log: log, fileOps: fileOps, purgeable: purgeable)
+            fetcher: ChunkFetcher(http: http, retry: RetryPolicy(maxAttempts: 1), sleeper: InstantSleeper()), disk: disk, log: log), store: store, disk: disk, log: log, fileOps: fileOps, purgeable: purgeable)
     }
     func restarted(http: (any HTTPClient)? = nil, runnerHooks: CrashHooks = .none, operationGuard: (any GameOperationGuard)? = nil) -> GameLibrary {
         GameLibrary(paths: paths, api: DeliveryAPI(http: http ?? cdn), runner: OperationRunner(store: store,
@@ -854,17 +973,17 @@ private struct LibraryFixture: ~Copyable {
     func assertFiles(_ version: Int, changedFiles: Int = 1) throws {
         for (path, body) in syntheticFiles(version, changedFiles: changedFiles) { #expect(try fs.readFile(at: SafeRelativePath(path), maxBytes: 100) == Data(body.utf8)) }
     }
-    func advertise(_ version: Int, opaqueIDs: Bool = false, collidingID: Bool = false, buildID: String? = nil, sharedAcrossFiles: Bool = false, changedFiles: Int = 1, games: [GameDefinition] = [game]) throws {
+    func advertise(_ version: Int, opaqueIDs: Bool = false, collidingID: Bool = false, buildID: String? = nil, sharedAcrossFiles: Bool = false, changedFiles: Int = 1, games: [GameDefinition] = [game], enableLdiff: Bool = false, diffTags: [String] = [], changedVoices: Bool = false) throws {
         let groups = [("base", "game"), ("extra", "extra"), ("voice", "en-us")]
         let categories: [[String: Any]] = groups.map { id, matching in ["category_id": id, "matching_field": matching,
             "type": id == "voice" ? "CATEGORY_TYPE_AUDIO" : "CATEGORY_TYPE_RESOURCE", "scenarios": ["CATEGORY_SCENARIO_FULL"]] }
         cdn.serve("hyp/hyp-connect/api/getGameBranches", data: try jsonData(["game_branches": games.map { game in ["game": ["id": "test", "biz": game.biz],
-            "main": ["package_id": "public-package", "password": "public-selector", "branch": "main", "tag": "\(version).0", "categories": categories]] }]))
-        cdn.serve("hyp/hyp-connect/api/getGameConfigs", data: try jsonData(["launch_configs": games.map { game in ["game": ["id": "test", "biz": game.biz], "installation_dir": "TestGame", "exe_file_name": "GenshinImpact.exe"] }]))
+            "main": ["package_id": "public-package", "password": "public-selector", "branch": "main", "tag": "\(version).0", "diff_tags": diffTags, "categories": categories]] }]))
+        cdn.serve("hyp/hyp-connect/api/getGameConfigs", data: try jsonData(["launch_configs": games.map { game in ["game": ["id": "test", "biz": game.biz], "installation_dir": "TestGame", "exe_file_name": "GenshinImpact.exe", "enable_ldiff": enableLdiff] }]))
         var descriptors: [[String: Any]] = []
         for (id, matching) in groups {
             var manifest = ProtobufWriter()
-            for (path, body) in syntheticFiles(version, sharedAcrossFiles: sharedAcrossFiles, changedFiles: changedFiles).sorted(by: { $0.key < $1.key }) {
+            for (path, body) in syntheticFiles(version, sharedAcrossFiles: sharedAcrossFiles, changedFiles: changedFiles, changedVoices: changedVoices).sorted(by: { $0.key < $1.key }) {
                 let belongs = id == "base" ? (path == "GenshinImpact.exe" || (path.hasPrefix("data/") && Int(path.suffix(2))! < 10)) :
                     id == "extra" ? (path == "shared.bin" || (path.hasPrefix("data/") && Int(path.suffix(2))! >= 10)) : (path.hasPrefix("audio/") || path == "shared.bin")
                 if !belongs { continue }
@@ -896,10 +1015,53 @@ private struct LibraryFixture: ~Copyable {
         }
         cdn.serve("downloader/sophon_chunk/api/getBuild", data: try jsonData(["build_id": buildID ?? "build-\(version)", "tag": "\(version).0", "manifests": descriptors]))
     }
+
+    func advertisePatches(tag: String = "2.0", buildID: String = "build-2", omitVoice: Bool = false, changedVoices: Bool = false, patchID: String = "patch-2") throws {
+        let old = syntheticFiles(1), target = syntheticFiles(2, changedVoices: changedVoices)
+        var descriptors: [[String: Any]] = []
+        for (id, matching, paths) in [("base", "game", ["GenshinImpact.exe", "data/01"]), ("extra", "extra", []), ("voice", "en-us", ["audio/en1"])] {
+            if omitVoice && id == "voice" { continue }
+            var manifest = ProtobufWriter(), container = Data("pad".utf8)
+            var patchEntries: [(ProtobufWriter, ProtobufWriter)] = []
+            for path in paths {
+                // A patch exercises the production decoder wiring; copies cover
+                // the separate raw-slice route and installed voice selection.
+                let patched = path == "GenshinImpact.exe", bytes = Data(target[path]!.utf8)
+                let source = Data(old[path]!.utf8)
+                let payload = patched ? Data("HDIFF13&\0".utf8)
+                    + Data([UInt8(bytes.count), UInt8(source.count), 0, 0, 0, 1, 0, 0, 0, UInt8(bytes.count), 0, UInt8(bytes.count - 1)]) + bytes : bytes
+                let offset = container.count; container.append(payload)
+                var instruction = ProtobufWriter()
+                instruction.string(1, id); instruction.string(2, "1.0"); instruction.string(3, "build-1")
+                // Each category has one shared container. Fill geometry after
+                // collecting its slices so every instruction binds the same MD5.
+                var file = ProtobufWriter(); file.string(1, path); file.varint(2, UInt64(bytes.count)); file.string(3, md5Library(bytes).hex)
+                instruction.varint(6, UInt64(offset)); instruction.varint(7, UInt64(payload.count))
+                if patched { instruction.string(8, path); instruction.varint(9, UInt64(source.count)); instruction.string(10, md5Library(source).hex) }
+                // Keep intermediate messages until the container is complete.
+                patchEntries.append((file, instruction))
+            }
+            for (var file, var instruction) in patchEntries {
+                instruction.varint(4, UInt64(container.count)); instruction.string(5, md5Library(container).hex)
+                var info = ProtobufWriter(); info.string(1, "1.0"); info.bytes(2, instruction.data)
+                file.bytes(4, info.data); manifest.bytes(1, file.data)
+            }
+            patchEntries.removeAll()
+            let frame = rawZstd(manifest.data)
+            cdn.serve("patch-manifests/\(id)", data: frame); cdn.serve("diffs/\(id)", data: container)
+            let descriptor: [String: Any] = ["url_prefix": "https://cdn.hoyoverse.com/patch-manifests", "url_suffix": "", "compression": 1, "encryption": 0, "password": ""]
+            var diff = descriptor; diff["url_prefix"] = "https://cdn.hoyoverse.com/diffs"; diff["compression"] = 0
+            descriptors.append(["category_id": id, "matching_field": matching, "manifest": ["id": id, "checksum": md5Library(manifest.data).hex,
+                "compressed_size": String(frame.count), "uncompressed_size": String(manifest.data.count)],
+                "manifest_download": descriptor, "diff_download": diff, "stats": [:]])
+        }
+        cdn.serve("downloader/sophon_chunk/api/getPatchBuild", data: try jsonData(["build_id": buildID, "patch_id": patchID, "tag": tag, "manifests": descriptors]))
+    }
 }
-private func syntheticFiles(_ version: Int, sharedAcrossFiles: Bool = false, changedFiles: Int = 1) -> [String: String] {
+private func syntheticFiles(_ version: Int, sharedAcrossFiles: Bool = false, changedFiles: Int = 1, changedVoices: Bool = false) -> [String: String] {
     var files = ["GenshinImpact.exe": "commonv\(version)!!!", "shared.bin": "shared-resource", "audio/en1": "voice-1", "audio/en2": "voice-2"]
     for i in 1...17 { files[String(format: "data/%02d", i)] = i == 1 ? "edit-\(version)" : (i <= changedFiles ? "edit-\(version)-\(i)" : "file-\(i)") }
+    if changedVoices { files["audio/en1"] = "voice-1-v\(version)" }
     if sharedAcrossFiles {
         files["data/01"] = "common" + String(repeating: "A", count: 100)
         files["data/02"] = "common" + String(repeating: "B", count: 100)
@@ -962,6 +1124,12 @@ private final class LibraryRequestGate: Sendable {
     }
 }
 private struct LibraryGatedHTTP: HTTPClient {
+    func post(_ url: URL) async throws -> (HTTPResponseHead, HTTPBody) {
+        let response = try await cdn.post(url)
+        await gate.pause(url)
+        return response
+    }
+
     let cdn: MockCDN
     let gate: LibraryRequestGate
     func get(_ url: URL, byteRangeFrom offset: Int64?) async throws -> (HTTPResponseHead, HTTPBody) {
@@ -986,6 +1154,10 @@ private actor LibraryMetadataGate {
     func release() { continuation?.resume(); continuation = nil }
 }
 private struct LibraryDelayedHTTP: HTTPClient {
+    func post(_ url: URL) async throws -> (HTTPResponseHead, HTTPBody) {
+        throw LauncherError.io("Unexpected POST")
+    }
+
     let cdn: MockCDN
     let gate: LibraryMetadataGate
     func get(_ url: URL, byteRangeFrom offset: Int64?) async throws -> (HTTPResponseHead, HTTPBody) {
@@ -1092,4 +1264,404 @@ private func expectOnlyRetainedSessionLock(_ fixture: borrowing LibraryFixture) 
     let retained = try SafeRelativePath("\(game.id)/.session.lock")
     #expect(try fs.contentsOfDirectory(at: SafeRelativePath(game.id)) == [retained])
     #expect(try fs.itemType(at: retained) == .regularFile)
+}
+
+extension GameLibraryTests {
+    @Test func preDownloadDrainDoesNotClaimLeaseHeldByAnotherGamesRefresh() async throws {
+        let f = try LibraryFixture(); try f.advertise(1); try await f.installGame(); try f.advertisePreDownload()
+        _ = try await libraryCollect(await f.library.preDownload(game))
+        let entered = TestEvent(), release = TestEvent(), store = f.store
+        let refresh = Task {
+            let lease = try await store.acquireOperationLease()
+            defer { withExtendedLifetime(lease) {} }
+            entered.signal(); try await release.wait()
+        }
+        defer { refresh.cancel(); release.signal() }
+        do {
+            try await entered.wait()
+            try await f.library.waitForPreDownloadDrain(game.id)
+            #expect(try await f.library.preDownloadInfo(game, refresh: false).state == .ready)
+            // Ordinary mutation/idle claims still refuse the competing owner.
+            await #expect(throws: LauncherError.self) { try await f.library.waitUntilIdle(game.id) }
+            release.signal(); try await refresh.value
+        } catch {
+            release.signal(); _ = await refresh.result
+            throw error
+        }
+    }
+
+    @Test(arguments: [false, true])
+    func releaseDayMetadataFailureKeepsMatchingCacheAndRefusesChunkFallback(partial: Bool) async throws {
+        for failure in ["config", "build", "manifest"] {
+            let disk = LibraryDisk(), f = try LibraryFixture(disk: disk)
+            try f.advertise(1); try await f.installGame(); try f.advertisePreDownload()
+            _ = try await libraryCollect(await f.library.preDownload(game))
+            let cache = try PreDownloadStore(fs: f.fs)
+            if partial {
+                var state = try #require(try cache.load())
+                state.completed = false; state.verified = []; try cache.save(state)
+                for entry in state.plan.containers.values {
+                    let bytes = try f.fs.readFile(at: cache.part(entry.object), maxBytes: 1 << 20)
+                    try f.fs.writeAtomically(Data(bytes.prefix(max(1, bytes.count / 2))), to: cache.part(entry.object))
+                }
+            }
+            let before = try libraryStateFiles(at: f.install), record = try await f.store.load(game.id)
+            try f.advertise(2, enableLdiff: true, diffTags: ["1.0"]); try f.advertisePatches()
+            let path = failure == "config" ? "hyp/hyp-connect/api/getGameConfigs" :
+                failure == "build" ? "downloader/sophon_chunk/api/getPatchBuild" : "patch-manifests/voice"
+            f.cdn.enqueueFault(path, .status(503))
+            disk.bytes.withLock { $0 = 0 }
+            let start = f.cdn.requestLog.count
+            await #expect(throws: LauncherError.transport("Update metadata unavailable")) {
+                _ = try await libraryCollect(await f.library.update(game, approved: true))
+            }
+            #expect(try await f.store.load(game.id) == record)
+            #expect(try libraryStateFiles(at: f.install) == before)
+            #expect(!f.cdn.requestLog.dropFirst(start).contains { $0.path.hasPrefix("chunks/") || $0.path.hasPrefix("diffs/") })
+            // A later explicit retry reads metadata again and can finish normally.
+            disk.bytes.withLock { $0 = Int64.max }
+            #expect(try await libraryCollect(await f.library.update(game, approved: true)).last == .phase(.completed))
+        }
+    }
+
+    @Test func disabledLdiffChunkPreflightKeepsMatchingCacheUntilDurableCompletion() async throws {
+        let disk = LibraryDisk(), f = try LibraryFixture(disk: disk)
+        try f.advertise(1); try await f.installGame(); try f.advertisePreDownload()
+        _ = try await libraryCollect(await f.library.preDownload(game))
+        let cache = try PreDownloadStore(fs: f.fs), before = try #require(try cache.load())
+        let parts = try before.plan.containers.values.map { try f.fs.readFile(at: cache.part($0.object), maxBytes: 1 << 20) }
+        try f.advertise(2, enableLdiff: false, diffTags: ["1.0"])
+        disk.bytes.withLock { $0 = 0 }
+        await #expect(throws: LauncherError.self) { _ = try await libraryCollect(await f.library.update(game, approved: true)) }
+        #expect(try cache.load() == before)
+        #expect(try before.plan.containers.values.map { try f.fs.readFile(at: cache.part($0.object), maxBytes: 1 << 20) } == parts)
+        let pending = try #require(try await f.store.load(game.id)?.pending)
+        let plan = try #require(try await f.store.loadPlan(for: game.id))
+        await #expect(throws: LauncherError.self) { _ = try await libraryCollect(await f.library.preDownload(game)) }
+        await #expect(throws: LauncherError.self) { _ = try await libraryCollect(await f.library.resumePreDownload(game)) }
+        #expect(try await f.library.preDownloadInfo(game).canDelete)
+        try await f.library.deletePreDownload(game)
+        #expect(try f.fs.itemType(at: PreDownloadStore.directory) == nil)
+        #expect(try await f.store.load(game.id)?.pending == pending)
+        #expect(try await f.store.loadPlan(for: game.id)?.planDigest == plan.planDigest)
+        try f.assertFiles(1)
+        // Deletion supplies no predicted APFS credit. A live probe still at
+        // zero must refuse resume; a later observed capacity permits it.
+        await #expect(throws: LauncherError.self) { _ = try await libraryCollect(await f.library.resume(game, approved: true)) }
+        disk.bytes.withLock { $0 = SpaceBudget.margin + 4_096 }
+        let start = f.cdn.requestLog.count
+        #expect(try await libraryCollect(await f.library.resume(game, approved: true)).last == .phase(.completed))
+        #expect(f.cdn.requestLog.dropFirst(start).contains { $0.path.hasPrefix("chunks/") })
+        #expect(try cache.load() == nil)
+    }
+
+    @Test func deletingCacheDuringPausedPatchUpdateRefetchesUnmovedContainersFromSavedURLs() async throws {
+        let disk = LibraryDisk(), f = try LibraryFixture(disk: disk)
+        try f.advertise(1); try await f.installGame(); try f.advertisePreDownload()
+        _ = try await libraryCollect(await f.library.preDownload(game))
+        let cache = try PreDownloadStore(fs: f.fs)
+        var saved = try #require(try cache.load())
+        saved.completed = false; saved.verified = []; try cache.save(saved)
+        for entry in saved.plan.containers.values {
+            let bytes = try f.fs.readFile(at: cache.part(entry.object), maxBytes: 1 << 20)
+            try f.fs.writeAtomically(Data(bytes.prefix(1)), to: cache.part(entry.object))
+        }
+        try f.advertise(2, enableLdiff: true, diffTags: ["1.0"]); try f.advertisePatches()
+        disk.bytes.withLock { $0 = 0 }
+        await #expect(throws: LauncherError.self) { _ = try await libraryCollect(await f.library.update(game, approved: true)) }
+        let pending = try #require(try await f.store.load(game.id)?.pending)
+        let plan = try #require(try await f.store.loadPlan(for: game.id))
+        #expect(plan.files.contains { if case .patch = $0.recipe { true } else { false } })
+        let ids = Set(plan.files.compactMap { $0.recipe?.containerID })
+        try #require(!ids.isEmpty)
+        for id in ids {
+            let object = try #require(plan.objects[id])
+            #expect(try f.fs.size(at: cache.part(object)) == 1)
+            #expect(try f.fs.size(at: StagingLayout(id: plan.id).object(object)) == nil)
+            #expect(object.urls.first?.path == "/diffs/base")
+        }
+        try await f.library.deletePreDownload(game)
+        #expect(try f.fs.itemType(at: PreDownloadStore.directory) == nil)
+        #expect(try await f.store.load(game.id)?.pending == pending)
+        #expect(try await f.store.loadPlan(for: game.id)?.planDigest == plan.planDigest)
+        try f.assertFiles(1)
+        try plan.validate(supportedCodecs: ChunkCodec.supportedCodecs)
+        let offline = MockCDN(), restart = f.restarted(http: offline), start = f.cdn.requestLog.count
+        disk.bytes.withLock { $0 = SpaceBudget.margin + 4_096 }
+        #expect(try await libraryCollect(await restart.resume(game, approved: true)).last == .phase(.completed))
+        #expect(offline.requestLog.isEmpty)
+        #expect(f.cdn.requestLog.dropFirst(start).map(\.path) == ["diffs/base"])
+        try f.assertFiles(2)
+    }
+
+    @Test(arguments: [false, true])
+    func transientPreDownloadMetadataFailurePreservesReadyAndPausedState(partial: Bool) async throws {
+        let f = try LibraryFixture(); try f.advertise(1); try await f.installGame(); try f.advertisePreDownload()
+        _ = try await libraryCollect(await f.library.preDownload(game))
+        let cache = try PreDownloadStore(fs: f.fs)
+        if partial {
+            var state = try #require(try cache.load()); state.completed = false; try cache.save(state)
+        }
+        let before = try #require(try cache.load()), info = try await f.library.preDownloadInfo(game, refresh: false)
+        for path in ["hyp/hyp-connect/api/getGameBranches", "hyp/hyp-connect/api/getGameConfigs",
+            "downloader/sophon_chunk/api/getPatchBuild", "patch-manifests/voice"] {
+            f.cdn.enqueueFault(path, .status(503))
+            #expect(try await f.library.preDownloadInfo(game) == info)
+            #expect(try cache.load() == before)
+        }
+        // A successful read can still establish withdrawal and hide the overlay.
+        try f.advertise(1, enableLdiff: true)
+        let withdrawn = try await f.library.preDownloadInfo(game)
+        #expect(withdrawn.state == .unavailable && withdrawn.canDelete)
+    }
+
+    @Test(arguments: [CrashPoint.afterPreDownloadObjectStored, .afterPreDownloadCompleted])
+    func preDownloadSurvivesProcessDeathWithoutAdvancingInstalled(point: CrashPoint) async throws {
+        let disk = LibraryDisk(), f = try LibraryFixture(disk: disk), fixtures = try TempDir()
+        try f.advertise(1); try await f.installGame(); try f.advertisePreDownload()
+        let before = try await f.store.load(game.id)
+        disk.bytes.withLock { $0 = 0 }
+        await #expect(throws: LauncherError.self) { _ = try await libraryCollect(await f.library.preDownload(game)) }
+        let state = try #require(try PreDownloadStore(fs: f.fs).load()), fixtureFS = try ContainedFileSystem(root: fixtures.url)
+        for container in state.plan.containers.values {
+            let url = try #require(container.object.urls.first), (_, body) = try await f.cdn.get(url, byteRangeFrom: nil)
+            var data = Data(); for try await bytes in body { data.append(bytes) }
+            try fixtureFS.writeAtomically(data, to: SafeRelativePath(String(url.path.dropFirst())))
+        }
+        let executable = Bundle(for: LibraryBundleToken.self).bundleURL.deletingLastPathComponent().appendingPathComponent("CrashHarness")
+        let result = try await SystemProcessRunner().run(executable,
+            arguments: [fixtures.url.path, f.install.path, point.rawValue, f.paths.games.path, "predownload"], environment: [:], currentDirectory: nil)
+        #expect(result.exitCode == 137)
+        #expect(try await f.store.load(game.id) == before)
+        let interrupted = try #require(try PreDownloadStore(fs: f.fs).load())
+        #expect(!interrupted.verified.isEmpty)
+        // A sibling may have synced its payload before the process exits at
+        // another worker's receipt. Resume must adopt those complete parts too.
+        let cache = try PreDownloadStore(fs: f.fs)
+        let resident = try interrupted.plan.containers.values.filter {
+            try f.fs.size(at: cache.part($0.object)) == $0.object.transferSize
+        }.count
+        disk.bytes.withLock { $0 = Int64.max }
+        let start = f.cdn.requestLog.count, hashes = Mutex([String: Int]())
+        let resumed = try await OperationWork.$objectHashObserver.withValue({ id in hashes.withLock { $0[id, default: 0] += 1 } }) {
+            try await libraryCollect(await f.library.resumePreDownload(game, expectedPlanID: state.plan.id))
+        }
+        #expect(resumed.last == .phase(.completed))
+        #expect(f.cdn.requestLog.count - start == state.plan.containers.count - resident)
+        #expect(hashes.withLock { $0.count == state.plan.containers.count && $0.values.allSatisfy { $0 == 1 } })
+        #expect(try await f.store.load(game.id) == before)
+        try f.assertFiles(1)
+    }
+
+    @Test func preDownloadPauseDrainsExclusionAndLeavesASeparatePlan() async throws {
+        let gate = LibraryRequestGate(pathSuffix: "diffs/base"), f = try LibraryFixture(requestGate: gate)
+        try f.advertise(1); try await f.installGame(); try f.advertisePreDownload()
+        let before = try await f.store.load(game.id)
+        let library = f.library
+        let task = Task { try await libraryCollect(await library.preDownload(game)) }
+        defer { task.cancel(); gate.release() }
+        try await gate.waitUntilEntered()
+        await #expect(throws: LauncherError.self) { try await f.library.deletePreDownload(game) }
+        task.cancel(); gate.release()
+        await #expect(throws: LauncherError.cancelled) { try await task.value }
+        try await f.library.waitUntilIdle(game.id)
+        #expect(try await f.library.preDownloadInfo(game, refresh: false).state == .paused)
+        #expect(try await f.store.load(game.id) == before)
+        try await f.library.deletePreDownload(game)
+        #expect(try f.fs.itemType(at: PreDownloadStore.directory) == nil)
+    }
+
+    @Test(arguments: [false, true]) func preDownloadRequiresEnabledConfigAndSupportedSource(enabled: Bool) async throws {
+        let f = try LibraryFixture(); try f.advertise(1); try await f.installGame()
+        try f.advertisePreDownload(enableLdiff: enabled, diffTags: enabled ? ["0.9"] : ["1.0"])
+        let start = f.cdn.requestLog.count
+        #expect(try await f.library.preDownloadInfo(game).state == .unavailable)
+        await #expect(throws: LauncherError.self) { _ = try await libraryCollect(await f.library.preDownload(game)) }
+        #expect(!f.cdn.requestLog.dropFirst(start).contains { $0.path.hasSuffix("getPatchBuild") })
+        #expect(try f.fs.itemType(at: PreDownloadStore.directory) == nil)
+    }
+
+    @Test func preDownloadOnlyWritesCacheAndPreservesInstalledFiles() async throws {
+        let f = try LibraryFixture(); try f.advertise(1); try await f.installGame()
+        let record = try await f.store.load(game.id)
+        let before = try syntheticFiles(1).keys.sorted().map { path in
+            let path = try SafeRelativePath(path)
+            return (path, try f.fs.regularFileIdentity(at: path), try f.fs.modificationDate(at: path), try f.fs.readFile(at: path, maxBytes: 100))
+        }
+        try f.advertisePreDownload()
+        let info = try await f.library.preDownloadInfo(game)
+        #expect(info.state == .available && info.version == "2.0" && info.bytes > 0 && !info.canDelete)
+        let start = f.cdn.requestLog.count
+        #expect(try await libraryCollect(await f.library.preDownload(game)).last == .phase(.completed))
+        #expect(try await f.store.load(game.id) == record)
+        for (path, identity, modified, data) in before {
+            #expect(try f.fs.regularFileIdentity(at: path) == identity)
+            #expect(try f.fs.modificationDate(at: path) == modified)
+            #expect(try f.fs.readFile(at: path, maxBytes: 100) == data)
+        }
+        let requests = f.cdn.requestLog.dropFirst(start).map(\.path)
+        #expect(Set(requests.filter { $0.hasPrefix("diffs/") }) == ["diffs/base", "diffs/voice"])
+        #expect(!requests.contains { $0.hasPrefix("chunks/") || $0.hasPrefix("manifests/") })
+        let ready = try await f.library.preDownloadInfo(game, refresh: false)
+        #expect(ready.state == .ready && ready.canDelete && ready.planID != nil)
+    }
+
+    @Test func preDownloadResumeUsesExactSavedDescriptorsWithoutDiscovery() async throws {
+        let f = try LibraryFixture(); try f.advertise(1); try await f.installGame(); try f.advertisePreDownload()
+        for try await event in await f.library.preDownload(game) {
+            if case .progress(let downloaded, _, _, _) = event, downloaded > 0 { break }
+        }
+        try await f.library.waitUntilIdle(game.id)
+        let saved = try await f.library.preDownloadInfo(game, refresh: false), start = f.cdn.requestLog.count
+        #expect(saved.planID != nil)
+        let restart = f.restarted()
+        #expect(try await libraryCollect(await restart.resumePreDownload(game, expectedPlanID: saved.planID)).last == .phase(.completed))
+        #expect(!f.cdn.requestLog.dropFirst(start).contains { $0.path.contains("api/") || $0.path.contains("manifests/") })
+        #expect(try await restart.preDownloadInfo(game, refresh: false).state == .ready)
+    }
+
+    @Test func withdrawnCacheIsDeleteOnlyAndStaleCampaignIsPruned() async throws {
+        let f = try LibraryFixture(); try f.advertise(1); try await f.installGame(); try f.advertisePreDownload()
+        _ = try await libraryCollect(await f.library.preDownload(game))
+        try f.advertise(1, enableLdiff: true)
+        let withdrawn = try await f.library.preDownloadInfo(game)
+        #expect(withdrawn.state == .unavailable && withdrawn.canDelete)
+        #expect(try f.fs.itemType(at: PreDownloadStore.directory) == .directory)
+        try f.advertise(3, enableLdiff: true)
+        let stale = try await f.library.preDownloadInfo(game)
+        #expect(stale.state == .unavailable && !stale.canDelete)
+        #expect(try f.fs.itemType(at: PreDownloadStore.directory) == nil)
+    }
+
+    @Test func newCampaignPrunesOldCacheEvenWhenItsMetadataFails() async throws {
+        let f = try LibraryFixture(); try f.advertise(1); try await f.installGame(); try f.advertisePreDownload()
+        _ = try await libraryCollect(await f.library.preDownload(game))
+        // Branch discovery succeeds, but the advertised future tag does not
+        // match the available build response. Stale bytes still need pruning.
+        try f.advertisePreDownload(target: "3.0")
+        let info = try await f.library.preDownloadInfo(game)
+        #expect(info.state == .unavailable && !info.canDelete)
+        #expect(try f.fs.itemType(at: PreDownloadStore.directory) == nil)
+    }
+
+    @Test func readyCacheSurvivesRefreshWhileMutationLeaseIsBusy() async throws {
+        let f = try LibraryFixture(); try f.advertise(1); try await f.installGame(); try f.advertisePreDownload()
+        _ = try await libraryCollect(await f.library.preDownload(game))
+        let before = try PreDownloadStore(fs: f.fs).load()
+        let lease = try await f.store.acquireOperationLease()
+        defer { withExtendedLifetime(lease) {} }
+        #expect(try await f.library.preDownloadInfo(game).state == .ready)
+        #expect(try PreDownloadStore(fs: f.fs).load() == before)
+    }
+}
+
+private extension LibraryFixture {
+    func advertisePreDownload(enableLdiff: Bool = true, diffTags: [String] = ["1.0"], target: String = "2.0") throws {
+        try advertise(2, enableLdiff: enableLdiff)
+        try advertisePatches()
+        let groups = [("base", "game"), ("extra", "extra"), ("voice", "en-us")]
+        let categories: [[String: Any]] = groups.map { id, matching in ["category_id": id, "matching_field": matching,
+            "type": id == "voice" ? "CATEGORY_TYPE_AUDIO" : "CATEGORY_TYPE_RESOURCE", "scenarios": ["CATEGORY_SCENARIO_FULL"]] }
+        cdn.serve("hyp/hyp-connect/api/getGameBranches", data: try jsonData(["game_branches": [["game": ["id": "test", "biz": game.biz],
+            "main": ["package_id": "public-package", "password": "public-selector", "branch": "main", "tag": "1.0", "categories": categories],
+            "pre_download": ["package_id": "public-package", "password": "public-selector", "branch": "pre_download", "tag": target, "diff_tags": diffTags, "categories": categories]]]]))
+    }
+}
+
+extension GameLibraryTests {
+    @Test func releaseDayMovesMatchingContainersAcrossChangedBuildAndPatchIDs() async throws {
+        let f = try LibraryFixture(); try f.advertise(1); try await f.installGame(); try f.advertisePreDownload()
+        _ = try await libraryCollect(await f.library.preDownload(game))
+        let cached = try #require(try PreDownloadStore(fs: f.fs).load())
+        try f.advertise(2, buildID: "promoted-build", enableLdiff: true, diffTags: ["1.0"])
+        try f.advertisePatches(buildID: "promoted-build", patchID: "promoted-patch")
+        let start = f.cdn.requestLog.count, hashes = Mutex([String: Int]())
+        let events = try await OperationWork.$objectHashObserver.withValue({ id in hashes.withLock { $0[id, default: 0] += 1 } }) {
+            try await libraryCollect(await f.library.update(game, approved: true))
+        }
+        #expect(events.last == .phase(.completed))
+        #expect(!f.cdn.requestLog.dropFirst(start).contains { $0.path.hasPrefix("diffs/") })
+        let used = try #require(cached.plan.containers.values.first { $0.rawID == "base" }).object
+        #expect(hashes.withLock { $0[used.id] } == 1)
+        #expect(try f.fs.itemType(at: PreDownloadStore.directory) == nil)
+        #expect(try await f.store.load(game.id)?.installed?.buildID == "promoted-build")
+        try f.assertFiles(2)
+    }
+
+    @Test(arguments: [false, true]) func uninstallRemovesPreDownloadIncludingAdoptedInstall(adopted: Bool) async throws {
+        let f = try LibraryFixture(); try f.advertise(1)
+        if adopted {
+            try f.seedExisting()
+            _ = try await libraryCollect(await f.library.adopt(game, folder: f.install, voices: ["en-us"]))
+            try f.fs.writeAtomically(Data("keep".utf8), to: SafeRelativePath("unmanaged"))
+        } else { try await f.installGame() }
+        try f.advertisePreDownload(); _ = try await libraryCollect(await f.library.preDownload(game))
+        try await f.library.uninstall(game)
+        let root = try ContainedFileSystem(root: f.base)
+        #expect(try root.itemType(at: SafeRelativePath("Install/.macgacha-predownload")) == nil)
+        if adopted { #expect(try f.fs.readFile(at: SafeRelativePath("unmanaged"), maxBytes: 4) == Data("keep".utf8)) }
+        #expect(try await f.store.load(game.id) == nil)
+    }
+
+    @Test func voiceRemovalPrunesOnlyUnreferencedCachedContainers() async throws {
+        let f = try LibraryFixture(); try f.advertise(1); try await f.installGame(); try f.advertisePreDownload()
+        _ = try await libraryCollect(await f.library.preDownload(game))
+        let cache = try PreDownloadStore(fs: f.fs), before = try #require(try cache.load())
+        let gameObject = try #require(before.plan.containers.values.first { $0.rawID == "base" }).object
+        let voiceObject = try #require(before.plan.containers.values.first { $0.rawID == "voice" }).object
+        _ = try await libraryCollect(await f.library.setVoices(game, []))
+        let after = try #require(try cache.load())
+        #expect(after.plan.voices.isEmpty)
+        #expect(try f.fs.size(at: cache.part(gameObject)) == gameObject.transferSize)
+        #expect(try f.fs.size(at: cache.part(voiceObject)) == nil)
+        #expect(try await f.library.preDownloadInfo(game, refresh: false).state == .ready)
+    }
+
+    @Test func voiceAddedAfterCacheDownloadsItsContainerOnlyOnUpdate() async throws {
+        let f = try LibraryFixture(); try f.advertise(1)
+        _ = try await libraryCollect(await f.library.install(game, voices: [], at: f.install, approved: true))
+        try f.advertisePreDownload(); _ = try await libraryCollect(await f.library.preDownload(game))
+        try f.advertise(1)
+        _ = try await libraryCollect(await f.library.setVoices(game, ["en-us"]))
+        #expect(try await f.library.preDownloadInfo(game, refresh: false).state == .paused)
+        try f.advertise(2, enableLdiff: true, diffTags: ["1.0"], changedVoices: true); try f.advertisePatches(changedVoices: true)
+        let start = f.cdn.requestLog.count
+        #expect(try await libraryCollect(await f.library.update(game, approved: true)).last == .phase(.completed))
+        #expect(f.cdn.requestLog.dropFirst(start).filter { $0.path.hasPrefix("diffs/") }.map(\.path) == ["diffs/voice"])
+    }
+}
+
+extension GameLibraryTests {
+    @Test(arguments: [CrashPoint.afterPreDownloadContainerMoved, .afterGameRecordSaved])
+    func releaseDayCrashRecoversMovesAndDurableCacheCleanup(point: CrashPoint) async throws {
+        let f = try LibraryFixture(), fixtures = try TempDir(), fixtureFS = try ContainedFileSystem(root: fixtures.url)
+        try f.advertise(1); try await f.installGame(); try f.advertisePreDownload()
+        _ = try await libraryCollect(await f.library.preDownload(game))
+        try f.advertise(2, buildID: "promoted-build", enableLdiff: true, diffTags: ["1.0"])
+        try f.advertisePatches(buildID: "promoted-build", patchID: "promoted-patch")
+        for path in ["hyp/hyp-connect/api/getGameBranches", "hyp/hyp-connect/api/getGameConfigs",
+            "downloader/sophon_chunk/api/getBuild", "downloader/sophon_chunk/api/getPatchBuild",
+            "manifests/v2-base", "manifests/v2-extra", "manifests/v2-voice",
+            "patch-manifests/base", "patch-manifests/extra", "patch-manifests/voice"] {
+            let (_, body) = try await f.cdn.get(URL(string: "https://cdn.hoyoverse.com/" + path)!, byteRangeFrom: nil)
+            var bytes = Data(); for try await piece in body { bytes.append(piece) }
+            try fixtureFS.writeAtomically(bytes, to: SafeRelativePath(path))
+        }
+        let executable = Bundle(for: LibraryBundleToken.self).bundleURL.deletingLastPathComponent().appendingPathComponent("CrashHarness")
+        let result = try await SystemProcessRunner().run(executable,
+            arguments: [fixtures.url.path, f.install.path, point.rawValue, f.paths.games.path, "patch-update"], environment: [:], currentDirectory: nil)
+        try #require(result.exitCode == 137, "\(String(decoding: result.stderr, as: UTF8.self))")
+        let start = f.cdn.requestLog.count, restart = f.restarted()
+        if point == .afterPreDownloadContainerMoved {
+            #expect(try await f.store.load(game.id)?.installed?.tag == "1.0")
+            #expect(try await libraryCollect(await restart.resume(game, approved: true)).last == .phase(.completed))
+        } else {
+            #expect(try await f.store.load(game.id)?.installed?.tag == "2.0")
+            #expect(try f.fs.itemType(at: PreDownloadStore.directory) == .directory)
+            await restart.start()
+        }
+        #expect(!f.cdn.requestLog.dropFirst(start).contains { $0.path.hasPrefix("diffs/") || $0.path.contains("api/") })
+        #expect(try f.fs.itemType(at: PreDownloadStore.directory) == nil)
+        try f.assertFiles(2)
+    }
 }

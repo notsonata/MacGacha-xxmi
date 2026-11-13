@@ -10,6 +10,13 @@ public struct LaunchComponentCopy: Equatable, Sendable {
     public let toSystem32: String
 }
 
+public struct ResolvedFpsInjector: Equatable, Sendable {
+    public let executable: URL
+    public let arguments: [String]
+    public let environment: [String: String]
+    public let currentDirectory: URL
+}
+
 public struct ResolvedLaunch: Equatable, Sendable {
     public let executable: URL
     public let arguments: [String]
@@ -22,19 +29,24 @@ public struct ResolvedLaunch: Equatable, Sendable {
     public let requiredComponents: [ComponentKind]
     public let componentCopies: [LaunchComponentCopy]
     public let displayFallback: Bool
+    public let fpsInjector: ResolvedFpsInjector?
 
     public static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.executable == rhs.executable && lhs.arguments == rhs.arguments && lhs.environment == rhs.environment
             && lhs.currentDirectory == rhs.currentDirectory && lhs.hidden == rhs.hidden
             && lhs.copyIfPresent.elementsEqual(rhs.copyIfPresent, by: { $0.source == $1.source && $0.toSystem32 == $1.toSystem32 })
             && lhs.blockedHosts == rhs.blockedHosts && lhs.preparation == rhs.preparation && lhs.requiredComponents == rhs.requiredComponents
-            && lhs.componentCopies == rhs.componentCopies && lhs.displayFallback == rhs.displayFallback
+            && lhs.componentCopies == rhs.componentCopies && lhs.displayFallback == rhs.displayFallback && lhs.fpsInjector == rhs.fpsInjector
     }
 }
 
 public enum LaunchResolver {
-    /// The Mainland China registry key is unverified; only Global supports this setting.
-    public static func offersStarRailUnlock(_ game: String) -> Bool { game == "starrail" }
+    /// Both editions store graphics settings under their own registry key (see `StarRailFrameRate`).
+    public static func offersStarRailUnlock(_ game: String) -> Bool { GameDefinition.find(game)?.family == .starrail }
+
+    public static func offersSurroundSound(_ game: String, backend: RuntimeBackend, runtimeBundleID: String?) -> Bool {
+        SurroundAudio.applies(game: game, backend: backend, bundleID: runtimeBundleID)
+    }
 
     /// Shared with setup availability; checking requirements never needs component files.
     public static func requiredComponents(recipe: LaunchRecipe, settings: LaunchSettings, runtimeBundleID: String?) -> [ComponentKind] {
@@ -43,15 +55,32 @@ public enum LaunchResolver {
             switch recipe.wrapper { case .none: break; case .jadeite: required.append(.jadeite); case .steamShim: required.append(.steamShim) }
         }
         if Crypt32Fix.applies(game: recipe.game, backend: settings.backend, bundleID: runtimeBundleID) { required.append(.crypt32Fix) }
+        if settings.surroundSound && offersSurroundSound(recipe.game, backend: settings.backend, runtimeBundleID: runtimeBundleID) {
+            required.append(.surroundAudio)
+        }
+        if settings.unlockFPS && GenshinFps.applies(to: recipe.game) { required.append(.genshinFps) }
         return required
     }
     public static func resolve(recipe: LaunchRecipe, settings: LaunchSettings, installRoot: URL, prefix: URL,
         wineBinary: URL, proxyPort: UInt16, componentRoots: [ComponentKind: URL], baseEnvironment: [String: String],
-        runtimeBundleID: String? = nil, displays: [String] = []) throws -> ResolvedLaunch {
+        runtimeBundleID: String? = nil, displays: [String] = [],
+        gameModeRuntime: GameModeRuntime? = nil, gameModeEnabled: Bool = true,
+        genshinFpsRiskAcknowledged: Bool = false) throws -> ResolvedLaunch {
         guard Recipes.recipe(for: recipe.game) != nil else { throw LauncherError.io("Unknown launch game: \(recipe.game)") }
         try settings.validate(for: recipe.game)
         for url in [installRoot, prefix, wineBinary] { try validateLocalURL(url) }
 
+        let surroundRequested = settings.surroundSound && offersSurroundSound(recipe.game, backend: settings.backend, runtimeBundleID: runtimeBundleID)
+        let module = componentRoots[.surroundAudio].map { SurroundAudio.modulePath.resolved(against: $0) }
+        let surroundActive = surroundRequested && module != nil && gameModeRuntime?.gameID == recipe.game && gameModeRuntime?.surroundModule == module
+        let helper = (gameModeEnabled || surroundActive) ? gameModeRuntime : nil
+        if let helper {
+            guard helper.gameID == recipe.game, helper.runtimeProfileID == nil || helper.runtimeProfileID == runtimeBundleID else {
+                throw LauncherError.io("Game Mode compatibility profile does not match the selected runtime")
+            }
+            try validateLocalURL(helper.wineBinary)
+            try validateLocalURL(helper.wineserver)
+        }
         let gamePath = WinePath.windowsPath(for: recipe.executable.resolved(against: installRoot))
         var arguments = [gamePath]
         let requiredComponents = requiredComponents(recipe: recipe, settings: settings, runtimeBundleID: runtimeBundleID)
@@ -90,12 +119,19 @@ public enum LaunchResolver {
         var environment = baseEnvironment.filter { basics.contains($0.key) || $0.key.hasPrefix("LC_") }
         environment["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
         environment["WINEPREFIX"] = prefix.path
+        if let helper {
+            environment["WINELOADER"] = helper.loader.path
+            // ntdll's default server search derives bin from lib, whereas this
+            // application uses MacOS. Keep child/server routes in the same mirror.
+            environment["WINESERVER"] = helper.wineserver.path
+        }
         environment["WINEDLLOVERRIDES"] = ""
         if requiredComponents.contains(.crypt32Fix) {
             environment["WINEDLLOVERRIDES"] = "crypt32=n,b"
             componentCopies.append(LaunchComponentCopy(root: try requiredRoot(.crypt32Fix, in: componentRoots),
                 source: try SafeRelativePath("x86_64-windows/crypt32.dll"), toSystem32: "crypt32.dll"))
         }
+        if surroundActive { environment["MACGACHA_SURROUND"] = "1" }
         environment["WINEDEBUG"] = "fixme-all"
         let proxy = "http://127.0.0.1:\(proxyPort)"
         for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] { environment[key] = proxy }
@@ -117,7 +153,15 @@ public enum LaunchResolver {
             }
             if !config.isEmpty { environment["DXMT_CONFIG"] = config.joined(separator: ";") }
         }
-        return ResolvedLaunch(executable: wineBinary, arguments: arguments, environment: environment,
+        let executable = helper?.wineBinary ?? wineBinary
+        let fpsInjector: ResolvedFpsInjector?
+        if settings.unlockFPS, GenshinFps.applies(to: recipe.game), genshinFpsRiskAcknowledged {
+            let root = try requiredRoot(.genshinFps, in: componentRoots)
+            fpsInjector = ResolvedFpsInjector(executable: executable,
+                arguments: [WinePath.windowsPath(for: GenshinFps.injectorPath.resolved(against: root)), "--target", String(settings.unlockTarget)],
+                environment: environment, currentDirectory: root)
+        } else { fpsInjector = nil }
+        return ResolvedLaunch(executable: executable, arguments: arguments, environment: environment,
             currentDirectory: installRoot, hidden: settings.compatibilityPatches ? recipe.hidden : [],
             copyIfPresent: settings.compatibilityPatches ? recipe.copyIfPresent : [],
             blockedHosts: settings.compatibilityPatches ? recipe.blockedHosts : [],
@@ -125,8 +169,9 @@ public enum LaunchResolver {
                 dxmtExtras: dxmt ? (["winemetal.dll"] + (starRail ? ["nvngx.dll"] : [])) : [], nvidiaKeys: dxmt && starRail,
                 crypt32Native: requiredComponents.contains(.crypt32Fix),
                 starRailFrameRate: offersStarRailUnlock(recipe.game) ? (settings.unlockFPS ? .unlock120 : .restore) : nil,
-                starRailRegion: starRail ? (GameDefinition.find(recipe.game)?.region ?? .global) : .global),
-            requiredComponents: requiredComponents, componentCopies: componentCopies, displayFallback: displayFallback)
+                starRailRegion: starRail ? (GameDefinition.find(recipe.game)?.region ?? .global) : .global,
+                windowsVersion: [GameFamily.genshin, .zzz].contains(GameDefinition.find(recipe.game)?.family ?? .starrail) ? .win11 : nil),
+            requiredComponents: requiredComponents, componentCopies: componentCopies, displayFallback: displayFallback, fpsInjector: fpsInjector)
     }
 
     private static func requiredRoot(_ kind: ComponentKind, in roots: [ComponentKind: URL]) throws -> URL {
