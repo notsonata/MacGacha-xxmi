@@ -8,7 +8,9 @@ set -euo pipefail
 name="${1:?usage: scripts/package-dmg.sh <release-name> [output-dir]}"
 output_dir="${2:-.build/release}"
 derived_data_path="${MACGACHA_DERIVED_DATA_PATH:-.build/xcode-release}"
-build_number="${MACGACHA_BUILD_NUMBER-1}"
+# Default to project.yml so a manual fork build never ships a lower build than
+# the last release (Sparkle compares build numbers).
+build_number="${MACGACHA_BUILD_NUMBER-$(sed -n 's/^ *CURRENT_PROJECT_VERSION: *//p' project.yml | head -n 1)}"
 if [[ ! "$build_number" =~ ^[1-9][0-9]*$ ]]; then
   printf 'error: MACGACHA_BUILD_NUMBER must be a positive integer\n' >&2
   exit 1

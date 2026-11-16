@@ -149,6 +149,9 @@ class PackageBuildNumberTests(unittest.TestCase):
     def test_packaging_forwards_explicit_and_default_build_numbers(self):
         root = Path(__file__).resolve().parent.parent
         version = re.search(r"MARKETING_VERSION: (\S+)", (root / "project.yml").read_text()).group(1)
+        # The default comes from project.yml so a manual fork build never ships
+        # a lower build number than the last release.
+        project_build = re.search(r"CURRENT_PROJECT_VERSION: (\S+)", (root / "project.yml").read_text()).group(1)
         with tempfile.TemporaryDirectory() as temp:
             folder = Path(temp)
             tools = {
@@ -166,7 +169,7 @@ class PackageBuildNumberTests(unittest.TestCase):
             env = {**os.environ, "PATH": f"{folder}:{os.environ['PATH']}",
                    "MACGACHA_DERIVED_DATA_PATH": str(folder / "derived"),
                    "RECORDED_BUILD_ARGS": str(folder / "arguments")}
-            for value, expected in [("42", "42"), (None, "1")]:
+            for value, expected in [("42", "42"), (None, project_build)]:
                 env.pop("MACGACHA_BUILD_NUMBER", None)
                 if value is not None:
                     env["MACGACHA_BUILD_NUMBER"] = value
