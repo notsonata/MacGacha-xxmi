@@ -20,9 +20,14 @@ extension ModSupportStore {
         }
         var candidates: [Candidate] = []
         var rejected = Set(listing.invalid.filter { !$0.hasPrefix(".") })
+        // An ignore lasts while its folder exists. Once the folder is gone, a
+        // new folder with that name is a new mod and is discovered normally.
+        let present = Set(listing.paths.map { foldedName($0.components.last!) })
+        let ignored = state.ignoredFolders?.filter { present.contains(foldedName($0)) }
+        state.ignoredFolders = (ignored?.isEmpty ?? true) ? nil : ignored
         for child in listing.paths {
             let folder = child.components.last!
-            if folder.hasPrefix(".") { continue }
+            if folder.hasPrefix(".") || state.isIgnored(folder) { continue }
             do {
                 guard let type = try library.itemType(at: child) else { continue }
                 switch type {
@@ -46,7 +51,7 @@ extension ModSupportStore {
             }
         }
 
-        let original = state.mods
+        let original = state.mods, originalIgnored = try loadState(layout: layout, fs: fs).ignoredFolders
         var remaining = original
         var reconciled: [ModSupportState.Mod] = []
         var added = 0
@@ -94,7 +99,7 @@ extension ModSupportStore {
         let retained = remaining.filter { rejected.contains($0.folderPath) }
         reconciled.append(contentsOf: retained)
         state.mods = reconciled
-        let changed = state.mods != original
+        let changed = state.mods != original || state.ignoredFolders != originalIgnored
         if changed { try saveState(state, layout: layout, fs: fs) }
         return ModLibraryRefreshResult(added: added, removed: remaining.count - retained.count, updated: updated,
             rejected: rejected.sorted(), changed: changed)

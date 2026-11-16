@@ -10,6 +10,40 @@ import Launch
 
 @Suite(.timeLimit(.minutes(1))) @MainActor
 struct ModSupportModelTests {
+    @Test func gameMovesStayClearOfRelocatedModLibraries() {
+        let library = URL(fileURLWithPath: "/Volumes/Games/MacGacha-ZZZ-Mods", isDirectory: true)
+        let source = URL(fileURLWithPath: "/Volumes/Games/ZenlessZoneZero Game", isDirectory: true)
+        func overlaps(_ destination: String, source: URL = source) -> Bool {
+            AppModel.moveOverlapsModLibrary(source: source,
+                destination: URL(fileURLWithPath: destination, isDirectory: true), libraries: [library])
+        }
+        #expect(overlaps("/Volumes/Games/MacGacha-ZZZ-Mods/ZenlessZoneZero Game"))
+        #expect(overlaps("/Volumes/Games/MacGacha-ZZZ-Mods"))
+        #expect(overlaps("/Volumes/Other/ZenlessZoneZero Game",
+            source: URL(fileURLWithPath: "/Volumes/Games", isDirectory: true)))
+        #expect(!overlaps("/Volumes/Other/ZenlessZoneZero Game"))
+        #expect(!overlaps("/Volumes/Games/MacGacha-ZZZ-Mods-2/ZenlessZoneZero Game"))
+        #expect(!AppModel.moveOverlapsModLibrary(source: source,
+            destination: URL(fileURLWithPath: "/Volumes/Games/MacGacha-ZZZ-Mods/x"), libraries: []))
+    }
+
+    @Test func sortOrdersUseNamesAddedDatesAndEnabledState() {
+        let day = { (n: Double) in Date(timeIntervalSince1970: n * 86_400) }
+        let mods = [
+            ManagedMod(id: "b", name: "beta", enabled: false, fileCount: 1, addedAt: day(3)),
+            ManagedMod(id: "a", name: "Alpha 10", enabled: true, fileCount: 1, addedAt: day(1)),
+            ManagedMod(id: "c", name: "alpha 2", enabled: false, fileCount: 1, addedAt: nil),
+            ManagedMod(id: "d", name: "Delta", enabled: true, fileCount: 1, addedAt: day(2)),
+        ]
+        // Finder-style names: case-insensitive and numeric-aware.
+        #expect(ModSortOrder.nameAscending.sorted(mods).map(\.id) == ["c", "a", "b", "d"])
+        #expect(ModSortOrder.nameDescending.sorted(mods).map(\.id) == ["d", "b", "a", "c"])
+        // Added dates from the folders; mods without a date go last.
+        #expect(ModSortOrder.recentlyAdded.sorted(mods).map(\.id) == ["b", "d", "a", "c"])
+        #expect(ModSortOrder.oldestAdded.sorted(mods).map(\.id) == ["a", "d", "b", "c"])
+        // Enabled mods first, each group by name.
+        #expect(ModSortOrder.enabledFirst.sorted(mods).map(\.id) == ["a", "d", "c", "b"])
+    }
     // Binary resources are generated locally and are required for distribution.
     private nonisolated static var bundledPackageAvailable: Bool {
         Bundle.main.url(forResource: "hsr-srmi", withExtension: "zip", subdirectory: "XXMI") != nil
@@ -133,7 +167,8 @@ struct ModSupportModelTests {
 
         #expect(model.modSupportError == nil)
         #expect(model.modSupportSnapshot?.modsDirectory?.standardizedFileURL == destination.standardizedFileURL)
-        #expect(model.modSupportSnapshot?.mods == before.mods)
+        // The copied folders get new creation dates; the mods themselves are unchanged.
+        #expect(model.modSupportSnapshot?.mods.map { [$0.id, $0.name, "\($0.enabled)", "\($0.fileCount)", $0.folderPath] } == before.mods.map { [$0.id, $0.name, "\($0.enabled)", "\($0.fileCount)", $0.folderPath] })
         #expect(model.modSupportSnapshot?.mods.first?.enabled == false)
         let relocated = destination.appendingPathComponent(imported.id, isDirectory: true)
         #expect(FileManager.default.fileExists(atPath: relocated.path))

@@ -65,6 +65,11 @@ enum ModSupportViewState: Equatable {
     func modSupportInstalledVersion(for gameID: String) -> String? {
         modSupportSnapshots[gameID]?.installedVersion
     }
+    /// Whether the built-in package is an upgrade, the same, or older than the
+    /// installed one (for example a newer package imported on its own).
+    func modSupportPackageRelation(for gameID: String) -> ModPackageRelation {
+        .between(installed: modSupportInstalledVersion(for: gameID), bundled: modSupportAvailableVersion(for: gameID))
+    }
     func modSupportAvailableVersion(for gameID: String) -> String? {
         modSupportPackages[gameID]?.manifest.version
     }
@@ -140,9 +145,17 @@ enum ModSupportViewState: Equatable {
         }
     }
 
-    func removeModSupport(_ id: String, gameID: String = AppModel.defaultModSupportGame) {
+    /// Without `deletingFiles` the folder stays on disk and refresh ignores it.
+    func removeModSupport(_ id: String, deletingFiles: Bool = true, gameID: String = AppModel.defaultModSupportGame) {
         runModSupport(.removing, gameID: gameID) { store in
-            try await store.removeMod(id: id)
+            try await store.removeMod(id: id, deletingFiles: deletingFiles)
+        }
+    }
+
+    /// Brings back every mod folder that was removed but kept on disk, disabled.
+    func restoreIgnoredModSupport(gameID: String = AppModel.defaultModSupportGame) {
+        runModSupport(.refreshing, gameID: gameID) { store in
+            try await store.restoreIgnoredMods()
         }
     }
 
@@ -249,11 +262,12 @@ enum ModSupportViewState: Equatable {
     }
 
     func filteredModSupportMods(matching query: String,
-        gameID: String = AppModel.defaultModSupportGame) -> [ManagedMod] {
+        gameID: String = AppModel.defaultModSupportGame,
+        sortedBy order: ModSortOrder = .nameAscending) -> [ManagedMod] {
         let mods = modSupportSnapshots[gameID]?.mods ?? []
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return mods }
-        return mods.filter { $0.name.localizedCaseInsensitiveContains(trimmed) }
+        let matching = trimmed.isEmpty ? mods : mods.filter { $0.name.localizedCaseInsensitiveContains(trimmed) }
+        return order.sorted(matching)
     }
 
     func revealModSupportFolder(gameID: String = AppModel.defaultModSupportGame) {
@@ -312,5 +326,52 @@ enum ModSupportViewState: Equatable {
 
     private func store(for gameID: String) -> ModSupportStore {
         modSupportStores[gameID] ?? modSupportStore
+    }
+}
+
+/// Display order for the XXMI mod list. "Added" orders use when each mod folder
+/// was added to the library (Finder's Date Added); mods without a date sort last.
+enum ModSortOrder: String, CaseIterable, Identifiable, Sendable {
+    case nameAscending, nameDescending, recentlyAdded, oldestAdded, enabledFirst
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .nameAscending: String(localized: "Name (A–Z)")
+        case .nameDescending: String(localized: "Name (Z–A)")
+        case .recentlyAdded: String(localized: "Recently Added")
+        case .oldestAdded: String(localized: "Oldest Added")
+        case .enabledFirst: String(localized: "Enabled First")
+        }
+    }
+
+    func sorted(_ mods: [ManagedMod]) -> [ManagedMod] {
+        switch self {
+        case .nameAscending: return mods.sorted { Self.nameOrder($0, $1) }
+        case .nameDescending: return mods.sorted { Self.nameOrder($1, $0) }
+        case .recentlyAdded: return mods.sorted { Self.addedOrder($0, $1, newestFirst: true) }
+        case .oldestAdded: return mods.sorted { Self.addedOrder($0, $1, newestFirst: false) }
+        case .enabledFirst:
+            let named = mods.sorted { Self.nameOrder($0, $1) }
+            return named.filter(\.enabled) + named.filter { !$0.enabled }
+        }
+    }
+
+    private static func addedOrder(_ lhs: ManagedMod, _ rhs: ManagedMod, newestFirst: Bool) -> Bool {
+        switch (lhs.addedAt, rhs.addedAt) {
+        case let (l?, r?) where l != r: return newestFirst ? l > r : l < r
+        case (.some, nil): return true
+        case (nil, .some): return false
+        default: return nameOrder(lhs, rhs)
+        }
+    }
+
+    private static func nameOrder(_ lhs: ManagedMod, _ rhs: ManagedMod) -> Bool {
+        switch lhs.name.localizedStandardCompare(rhs.name) {
+        case .orderedAscending: true
+        case .orderedDescending: false
+        case .orderedSame: lhs.id < rhs.id
+        }
     }
 }

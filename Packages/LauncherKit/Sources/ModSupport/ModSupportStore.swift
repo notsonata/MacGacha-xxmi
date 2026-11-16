@@ -14,6 +14,8 @@ public actor ModSupportStore {
     nonisolated let layout: ModSupportLayout
     private nonisolated let profile: ModSupportProfile
     nonisolated let fileOps: any FileOps
+    /// This app's build, checked against a package's minimumAppBuild.
+    nonisolated let appBuild: Int?
     nonisolated let gate = OperationGate()
     /// Trash purges run after the gate is released so a large reclamation never
     /// delays the next launch. Each purge waits for the previous one.
@@ -31,14 +33,17 @@ public actor ModSupportStore {
         self.runner = runner
         self.profile = profile
         self.fileOps = SystemFileOps()
+        self.appBuild = ModSupportConstants.runningAppBuild
         layout = ModSupportLayout(paths: paths, profile: profile)
     }
 
     init(paths: AppPaths, profile: ModSupportProfile = .starRail,
-        runner: any ProcessRunner = SystemProcessRunner(), fileOps: any FileOps) {
+        runner: any ProcessRunner = SystemProcessRunner(), fileOps: any FileOps,
+        appBuild: Int? = ModSupportConstants.runningAppBuild) {
         self.runner = runner
         self.profile = profile
         self.fileOps = fileOps
+        self.appBuild = appBuild
         layout = ModSupportLayout(paths: paths, profile: profile)
     }
 
@@ -180,19 +185,38 @@ public actor ModSupportStore {
                 let state = try Self.loadState(layout: layout, fs: fs)
                 let installed = try Self.installedManifest(layout: layout, profile: profile,
                     fs: fs, state: state, strict: false)
+                let library = layout.libraryDirectory(for: state)
                 return state.snapshot(installedVersion: installed?.version,
-                    modsDirectory: layout.libraryDirectory(for: state))
+                    modsDirectory: library, addedDates: Self.folderAddedDates(state: state, library: library))
             }
         }
+    }
+
+    /// Read-only "date added" of the mod folders, matching Finder's Date Added
+    /// column: when each folder was placed in the library. Extracted or moved
+    /// mods keep an older creation date, which is only a fallback. A missing
+    /// library (for example a disconnected drive) or an unreadable folder
+    /// simply has no date.
+    static func folderAddedDates(state: ModSupportState, library: URL) -> [String: Date] {
+        var dates: [String: Date] = [:]
+        for mod in state.mods {
+            let folder = library.appendingPathComponent(mod.folderPath, isDirectory: true)
+            let values = try? folder.resourceValues(forKeys: [.addedToDirectoryDateKey, .creationDateKey])
+            if let date = values?.addedToDirectoryDate ?? values?.creationDate {
+                dates[mod.id] = date
+            }
+        }
+        return dates
     }
 
     /// Stages the external archive, verifies every declared file, then atomically
     /// publishes the version without changing mods or preferences.
     public func install(manifest: ModPackageManifest, archive: URL) async throws {
-        let layout = layout, profile = profile, runner = runner, fileOps = fileOps
+        let layout = layout, profile = profile, runner = runner, fileOps = fileOps, appBuild = appBuild
         try await gate.run {
             try await BlockingIO.run {
                 try manifest.validate()
+                try manifest.requireCompatible(appBuild: appBuild)
                 guard manifest.gameID == profile.gameID, profile.accepts(packageID: manifest.id),
                     manifest.supportedRuntimeBundleIDs.contains(ModSupportConstants.runtimeBundleID) else {
                     throw LauncherError.io("The mod package does not support this game on the verified runtime")
@@ -276,7 +300,10 @@ public actor ModSupportStore {
     }
 
     /// Removes the library entry and its copied files without touching the source.
-    public func removeMod(id: String) async throws {
+    /// Removes a mod from MacGacha. With `deletingFiles` its library folder is
+    /// deleted. Without it the folder stays on disk and is ignored by refresh
+    /// until it is restored or disappears.
+    public func removeMod(id: String, deletingFiles: Bool = true) async throws {
         let layout = layout, fileOps = fileOps
         try await gate.run {
             try await BlockingIO.run {
@@ -287,6 +314,12 @@ public actor ModSupportStore {
                     throw LauncherError.io("Mod is not imported")
                 }
                 try layout.ensureDirectories(fs, includeMods: state.modsDirectory == nil)
+                guard deletingFiles else {
+                    let folder = state.mods.remove(at: index).folderPath
+                    state.ignoredFolders = (state.ignoredFolders ?? []) + [folder]
+                    try Self.saveState(state, layout: layout, fs: fs)
+                    return
+                }
                 let library = try Self.libraryFileSystem(state: state, layout: layout,
                     fileOps: fileOps)
                 let modPath = try SafeRelativePath(state.mods[index].folderPath)
@@ -302,6 +335,23 @@ public actor ModSupportStore {
                     throw error
                 }
                 if hasFiles { try? library.removeItem(at: quarantinePath) }
+            }
+        }
+    }
+
+    /// Forgets every ignore, then rescans so kept folders return (disabled).
+    @discardableResult
+    public func restoreIgnoredMods() async throws -> ModLibraryRefreshResult {
+        let layout = layout, fileOps = fileOps
+        return try await gate.run {
+            try await BlockingIO.run {
+                let fs = try ContainedFileSystem(root: layout.root, fileOps: fileOps)
+                var state = try Self.loadState(layout: layout, fs: fs)
+                if state.ignoredFolders != nil {
+                    state.ignoredFolders = nil
+                    try Self.saveState(state, layout: layout, fs: fs)
+                }
+                return try Self.refreshLibrary(layout: layout, fileOps: fileOps)
             }
         }
     }
@@ -327,9 +377,11 @@ public actor ModSupportStore {
 
     /// Returns nil while injection is off. Otherwise re-verifies the installed
     /// package and copies it plus enabled mods into an immutable launch session.
+    /// `sessionDriveLetter` is the prefix drive that maps this profile's sessions
+    /// folder; native snapshots render their absolute payload paths through it.
     public func prepareLaunch(gameID: String, runtimeBundleID: String, backendD3D11: URL,
-        directX12: Bool = false) async throws -> PreparedModLaunch? {
-        let layout = layout, profile = profile, fileOps = fileOps
+        directX12: Bool = false, sessionDriveLetter: String = "M") async throws -> PreparedModLaunch? {
+        let layout = layout, profile = profile, fileOps = fileOps, appBuild = appBuild
         // Retry leftover trash from earlier sessions, whatever this launch does.
         defer { schedulePurge() }
         return try await gate.run {
@@ -358,7 +410,12 @@ public actor ModSupportStore {
                     manifest.supportedRuntimeBundleIDs.contains(runtimeBundleID) else {
                     throw LauncherError.io("The installed mod package is incompatible")
                 }
+                // An older app (for example after a downgrade) never runs a package
+                // that relies on newer app behaviour.
+                try manifest.requireCompatible(appBuild: appBuild)
                 let backend = try ModBackendPath.windowsPath(for: backendD3D11)
+                let mode = profile.loadingMode
+                if mode == .nativeProxy { try Self.validateSessionDriveLetter(sessionDriveLetter) }
                 try layout.ensureDirectories(fs, includeMods: state.modsDirectory == nil)
                 let library = try Self.libraryFileSystem(state: state, layout: layout,
                     fileOps: fileOps)
@@ -375,9 +432,19 @@ public actor ModSupportStore {
                         + (payloadDirectory.map { $0.description + "/" } ?? "") + "Mods")
                     try Self.copyEnabledMods(state: state, library: library, fs: fs,
                         modsPath: modsPath)
-                    try Self.configureD3DX(fs: fs, sessionPath: sessionPath,
-                        payloadDirectory: payloadDirectory, backend: backend,
-                        target: profile.runnerTarget)
+                    switch mode {
+                    case .hookRunner:
+                        try Self.configureD3DX(fs: fs, sessionPath: sessionPath,
+                            payloadDirectory: payloadDirectory, backend: backend,
+                            target: profile.runnerTarget)
+                    case .nativeProxy:
+                        try Self.verifyNativeSnapshot(manifest: manifest, fs: fs, sessionPath: sessionPath,
+                            payloadDirectory: payloadDirectory)
+                        try Self.configureNativeD3DX(fs: fs, sessionPath: sessionPath,
+                            payloadDirectory: payloadDirectory, backend: backend, target: profile.runnerTarget,
+                            windowsPayloadDirectory: Self.sessionDrivePayloadPath(letter: sessionDriveLetter,
+                                sessionName: sessionName, payloadDirectory: payloadDirectory))
+                    }
                     try Self.seedUserConfig(fs: fs, layout: layout, sessionName: sessionName,
                         payloadDirectory: payloadDirectory)
                     let runnerPath = try Self.sessionFile(manifest.runnerPath, sessionPath: sessionPath)
@@ -391,7 +458,7 @@ public actor ModSupportStore {
                     return PreparedModLaunch(runnerURL: runnerPath.resolved(against: layout.root),
                         injectorURL: injectorPath.resolved(against: layout.root),
                         payloadURL: payloadPath.resolved(against: layout.root),
-                        sessionDirectory: sessionPath.resolved(against: layout.root))
+                        sessionDirectory: sessionPath.resolved(against: layout.root), loadingMode: mode)
                 } catch {
                     _ = await Self.moveToTrash(sessionPath, layout: layout, fileOps: fileOps)
                     throw error

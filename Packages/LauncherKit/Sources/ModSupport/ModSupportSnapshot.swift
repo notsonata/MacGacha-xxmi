@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // MacGacha — https://github.com/deruta74/MacGacha — see LICENSE and NOTICE (additional term under GPL section 7(b)).
 import Foundation
+import LauncherCore
 
 /// Counts from rescanning the library for folders placed there outside the app.
 public struct ModLibraryRefreshResult: Sendable, Equatable {
@@ -48,13 +49,17 @@ public struct ManagedMod: Identifiable, Sendable, Equatable {
     public let enabled: Bool
     public let fileCount: Int
     public let folderPath: String
+    /// When the mod's folder was added to the library (Finder's Date Added,
+    /// falling back to its creation date), or nil when it cannot be read.
+    public let addedAt: Date?
 
-    public init(id: String, name: String, enabled: Bool, fileCount: Int, folderPath: String? = nil) {
+    public init(id: String, name: String, enabled: Bool, fileCount: Int, folderPath: String? = nil, addedAt: Date? = nil) {
         self.id = id
         self.name = name
         self.enabled = enabled
         self.fileCount = fileCount
         self.folderPath = folderPath ?? id
+        self.addedAt = addedAt
     }
 }
 
@@ -66,11 +71,14 @@ public struct ModSupportSnapshot: Sendable, Equatable {
     /// The library the store currently reads. It can be a custom location the
     /// user picked, including one whose volume is temporarily unavailable.
     public let modsDirectory: URL?
+    /// Folders removed from MacGacha but kept on disk; refresh skips them.
+    public let ignoredFolders: [String]
 
     public var isInstalled: Bool { installedVersion != nil }
 
     public init(installedVersion: String?, injectionEnabled: Bool, riskAcknowledged: Bool, mods: [ManagedMod],
-        modsDirectory: URL? = nil) {
+        modsDirectory: URL? = nil, ignoredFolders: [String] = []) {
+        self.ignoredFolders = ignoredFolders
         self.installedVersion = installedVersion
         self.injectionEnabled = injectionEnabled
         self.riskAcknowledged = riskAcknowledged
@@ -86,11 +94,15 @@ public struct PreparedModLaunch: Sendable, Equatable {
     public let injectorURL: URL
     public let payloadURL: URL
     public let sessionDirectory: URL
+    /// The route the snapshot was configured for. Its `d3dx.ini` differs per mode.
+    public let loadingMode: ModLoadingMode
 
-    public init(runnerURL: URL, injectorURL: URL, payloadURL: URL, sessionDirectory: URL) {
+    public init(runnerURL: URL, injectorURL: URL, payloadURL: URL, sessionDirectory: URL,
+        loadingMode: ModLoadingMode = .hookRunner) {
         self.runnerURL = runnerURL
         self.injectorURL = injectorURL
         self.payloadURL = payloadURL
         self.sessionDirectory = sessionDirectory
+        self.loadingMode = loadingMode
     }
 }

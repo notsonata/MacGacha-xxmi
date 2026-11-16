@@ -127,3 +127,15 @@ import Testing
     }
     #expect(try await store.snapshot().mods.isEmpty)
 }
+
+@Test func snapshotReportsWhenEachModFolderWasAdded() async throws {
+    let root = try makeTestRoot(); defer { removeTestRoot(root) }
+    let store = ModSupportStore(paths: appPaths(root))
+    let before = Date().addingTimeInterval(-60)
+    try await store.importMod(from: try makeModFolder(root: root, name: "First Mod"))
+    try await store.importMod(from: try makeModFolder(root: root, name: "Second Mod"))
+    let mods = try await store.snapshot().mods
+    let first = try #require(mods.first { $0.name == "First Mod" }?.addedAt)
+    let second = try #require(mods.first { $0.name == "Second Mod" }?.addedAt)
+    #expect(first >= before && second >= first)
+}

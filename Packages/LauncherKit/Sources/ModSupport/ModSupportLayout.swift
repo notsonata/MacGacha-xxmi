@@ -5,6 +5,8 @@ import LauncherCore
 
 enum ModSupportConstants {
     static let runtimeBundleID = "d3dmetal-wine11.20-gptk4.0b3"
+    /// The running app's CFBundleVersion, compared with a package's minimumAppBuild.
+    static let runningAppBuild: Int? = (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String).flatMap { Int($0) }
     static let maximumStateBytes = 1 << 20
     static let maximumSettingsTextBytes = 64 << 10
     static let maximumSRMIUserConfigBytes = 1 << 20
@@ -122,6 +124,13 @@ struct ModSupportState: Codable, Sendable, Equatable {
     /// An absolute custom library folder. Older state without this key keeps
     /// using the managed default under the app data root.
     var modsDirectory: String?
+    /// Library folders the user removed from MacGacha but kept on disk. Refresh
+    /// never adopts them again. nil decodes older state and is never written.
+    var ignoredFolders: [String]?
+
+    func isIgnored(_ folder: String) -> Bool {
+        ignoredFolders?.contains { foldedName($0) == foldedName(folder) } ?? false
+    }
 
     func validate() throws {
         guard schemaVersion == 1 else { throw LauncherError.journalCorrupt("unsupported mod support schema") }
@@ -132,7 +141,16 @@ struct ModSupportState: Codable, Sendable, Equatable {
                 throw LauncherError.journalCorrupt("mod support library path is invalid")
             }
         }
-        guard mods.count <= 10_000 else { throw LauncherError.journalCorrupt("mod support state is too large") }
+        guard mods.count <= 10_000, (ignoredFolders?.count ?? 0) <= 10_000 else {
+            throw LauncherError.journalCorrupt("mod support state is too large")
+        }
+        var ignored: Set<String> = []
+        for folder in ignoredFolders ?? [] {
+            guard let path = try? SafeRelativePath(folder), path.components.count == 1, path.description == folder,
+                validateDisplayName(folder) == folder, ignored.insert(foldedName(folder)).inserted else {
+                throw LauncherError.journalCorrupt("mod support state has an invalid ignored folder")
+            }
+        }
         var ids: Set<String> = []
         var names: Set<String> = []
         var folders: Set<String> = []
@@ -147,21 +165,23 @@ struct ModSupportState: Codable, Sendable, Equatable {
                 validateDisplayName(mod.name) != nil,
                 ids.insert(mod.id).inserted,
                 names.insert(foldedName(mod.name)).inserted,
-                folders.insert(foldedName(folder)).inserted else {
+                folders.insert(foldedName(folder)).inserted, !ignored.contains(foldedName(folder)) else {
                 throw LauncherError.journalCorrupt("mod support state has an invalid mod")
             }
         }
     }
 
-    func snapshot(installedVersion: String?, modsDirectory: URL? = nil) -> ModSupportSnapshot {
+    func snapshot(installedVersion: String?, modsDirectory: URL? = nil, addedDates: [String: Date] = [:]) -> ModSupportSnapshot {
         ModSupportSnapshot(installedVersion: installedVersion, injectionEnabled: injectionEnabled,
             riskAcknowledged: riskAcknowledged,
-            mods: mods.map { ManagedMod(id: $0.id, name: $0.name, enabled: $0.enabled, fileCount: $0.fileCount, folderPath: $0.folderPath) }
+            mods: mods.map { ManagedMod(id: $0.id, name: $0.name, enabled: $0.enabled, fileCount: $0.fileCount,
+                folderPath: $0.folderPath, addedAt: addedDates[$0.id]) }
                 .sorted {
                     let left = $0.name.lowercased(), right = $1.name.lowercased()
                     return left == right ? $0.id < $1.id : left < right
                 },
-            modsDirectory: modsDirectory)
+            modsDirectory: modsDirectory, ignoredFolders: (ignoredFolders ?? []).sorted {
+                $0.localizedStandardCompare($1) == .orderedAscending })
     }
 }
 

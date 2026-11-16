@@ -12,6 +12,7 @@ struct XXMIPanel: View {
     @Environment(AppModel.self) private var model
     let gameID: String
     @State private var searchText = ""
+    @AppStorage("xxmiModSortOrder") private var sortOrder: ModSortOrder = .nameAscending
     @State private var pendingRemoval: ManagedMod?
     @State private var confirmingRisk = false
     @State private var isDropTargeted = false
@@ -48,14 +49,10 @@ struct XXMIPanel: View {
         } message: {
             Text("Mods inject code into the game. HoYoverse may treat this as cheating and permanently ban the account. Enable only if you accept that risk.")
         }
-        .confirmationDialog(removalTitle, isPresented: removalBinding) {
-            Button("Remove Mod", role: .destructive) {
-                if let mod = pendingRemoval { model.removeModSupport(mod.id, gameID: gameID) }
-                pendingRemoval = nil
+        .sheet(item: $pendingRemoval) { mod in
+            RemoveModSheet(mod: mod) { deletingFiles in
+                model.removeModSupport(mod.id, deletingFiles: deletingFiles, gameID: gameID)
             }
-            Button("Cancel", role: .cancel) { pendingRemoval = nil }
-        } message: {
-            Text("The imported copy is deleted. The original folder or ZIP archive is not changed.")
         }
     }
 
@@ -91,6 +88,16 @@ struct XXMIPanel: View {
 
     // MARK: - Package
 
+    private var packageRelationNote: String? {
+        switch model.modSupportPackageRelation(for: gameID) {
+        case .bundledOlder:
+            String(localized: "The installed package is newer than the one built into this app. To repair it, import the same package again.")
+        case .unknownOrder:
+            String(localized: "The installed package is not a regular release. Import a release package or use the built-in one.")
+        default: nil
+        }
+    }
+
     private var packageSection: some View {
         Section {
             LabeledContent("Installed") {
@@ -117,12 +124,26 @@ struct XXMIPanel: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            if let note = packageRelationNote {
+                Text(note)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             HStack(spacing: 8) {
                 if model.modSupportSnapshot(for: gameID)?.isInstalled == true {
-                    Button("Repair") { model.repairBundledModSupport(gameID: gameID) }
-                    if model.modSupportAvailableVersion(for: gameID) != nil,
-                        model.modSupportAvailableVersion(for: gameID) != model.modSupportInstalledVersion(for: gameID) {
+                    switch model.modSupportPackageRelation(for: gameID) {
+                    case .same:
+                        Button("Repair") { model.repairBundledModSupport(gameID: gameID) }
+                    case .bundledNewer:
                         Button("Update") { model.updateBundledModSupport(gameID: gameID) }
+                    case .bundledOlder, .unknownOrder:
+                        // Never a silent downgrade: the button names the version it installs.
+                        if let bundled = model.modSupportAvailableVersion(for: gameID) {
+                            Button("Use Built-in \(bundled)") { model.repairBundledModSupport(gameID: gameID) }
+                        }
+                    case .notInstalled, .noBundledPackage:
+                        EmptyView()
                     }
                 } else {
                     Button("Install") { model.installBundledModSupport(gameID: gameID) }
@@ -177,13 +198,9 @@ struct XXMIPanel: View {
 
     /// Offered only while a session launched with injection is running. The
     /// update is a manual action; nothing watches the library or sends keys.
+    /// Its button sits beside Done in the sheet toolbar (`PanelSheet`).
     private var runningGameSection: some View {
         Section {
-            HStack(spacing: 8) {
-                Button("Apply Mods to Running Game") { model.applyModsToRunningGame(gameID: gameID) }
-                    .disabled(model.isModSupportBusy(for: gameID))
-                Spacer()
-            }
             if model.showsModLiveApplyPrompt(gameID: gameID) {
                 HStack(alignment: .top, spacing: 8) {
                     Label("Mods were copied to the running game. Switch to the game and press F10 (fn+F10 on a Mac keyboard) to reload them.",
@@ -233,6 +250,13 @@ struct XXMIPanel: View {
                 TextField("Search Mods", text: $searchText)
                     .textFieldStyle(.plain)
                     .accessibilityLabel("Search Mods")
+                Picker("Sort Mods", selection: $sortOrder) {
+                    ForEach(ModSortOrder.allCases) { Text($0.title).tag($0) }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .fixedSize()
+                .accessibilityLabel("Sort Mods")
             }
             dropZone
             if mods.isEmpty {
@@ -258,6 +282,11 @@ struct XXMIPanel: View {
                     .accessibilityLabel("Show Mods Folder in Finder")
                 Button("Refresh") { model.rescanModSupportLibrary(gameID: gameID) }
                     .disabled(model.isModSupportBusy(for: gameID))
+                if let ignored = model.modSupportSnapshot(for: gameID)?.ignoredFolders, !ignored.isEmpty {
+                    Button("Restore Ignored (\(ignored.count))") { model.restoreIgnoredModSupport(gameID: gameID) }
+                        .disabled(model.isModSupportBusy(for: gameID))
+                        .help(ignored.joined(separator: "\n"))
+                }
                 Button("Import…") { chooseMod() }
                     .disabled(model.isModSupportBusy(for: gameID))
             }
@@ -267,7 +296,7 @@ struct XXMIPanel: View {
     }
 
     private var mods: [ManagedMod] {
-        model.filteredModSupportMods(matching: searchText, gameID: gameID)
+        model.filteredModSupportMods(matching: searchText, gameID: gameID, sortedBy: sortOrder)
     }
 
     private var dropZone: some View {
@@ -310,15 +339,6 @@ struct XXMIPanel: View {
                 }
             }
         )
-    }
-
-    private var removalBinding: Binding<Bool> {
-        Binding(get: { pendingRemoval != nil }, set: { if !$0 { pendingRemoval = nil } })
-    }
-
-    private var removalTitle: String {
-        guard let mod = pendingRemoval else { return String(localized: "Remove Mod?") }
-        return String(localized: "Remove \(mod.name)?", comment: "Mod removal confirmation; the argument is the mod's name")
     }
 
     private func activityLabel(_ activity: ModSupportActivity) -> String {
@@ -414,5 +434,46 @@ private struct ModRow: View {
             .accessibilityLabel(Text("Remove \(mod.name)", comment: "Remove a mod; the argument is the mod's name"))
         }
         .padding(.vertical, 2)
+    }
+}
+
+/// Removing a mod either deletes its library folder or keeps it on disk and
+/// stops MacGacha from picking it up again on Refresh.
+private struct RemoveModSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let mod: ManagedMod
+    let remove: (Bool) -> Void
+    @State private var deletingFiles = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Remove \(mod.name)?", comment: "Mod removal confirmation; the argument is the mod's name")
+                .font(.headline)
+            Toggle("Delete mod files from disk too", isOn: $deletingFiles)
+            Group {
+                if deletingFiles {
+                    Text("The mod's folder in your mods library is deleted. The original folder or ZIP you imported from is not changed.")
+                } else {
+                    Text("The mod's folder stays in your mods library, and MacGacha ignores it, even when you refresh. Use Restore Ignored to bring it back.")
+                }
+            }
+            .font(.callout)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel) { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button(role: .destructive) {
+                    remove(deletingFiles)
+                    dismiss()
+                } label: {
+                    if deletingFiles { Text("Delete Mod") } else { Text("Remove Mod") }
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 420)
     }
 }

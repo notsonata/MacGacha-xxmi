@@ -141,7 +141,8 @@ private func makeLibraryMod(in library: URL, name: String,
     try FileManager.default.removeItem(at: destination)
 
     await #expect(throws: LauncherError.self) { try await store.refreshModLibrary() }
-    #expect(try await store.snapshot().mods == before.mods)
+    // Folder dates are unreadable while the library is missing; the mods themselves are unchanged.
+    #expect(try await store.snapshot().mods.map { [$0.id, $0.name, "\($0.enabled)", "\($0.fileCount)", $0.folderPath] } == before.mods.map { [$0.id, $0.name, "\($0.enabled)", "\($0.fileCount)", $0.folderPath] })
 }
 
 @Test func refreshPreservesDisabledRecordWhenFolderIsTemporarilyRejected() async throws {
@@ -179,4 +180,85 @@ private func makeLibraryMod(in library: URL, name: String,
     #expect(result.rejected == ["Trailing "])
     #expect(result.added == 1)
     #expect(try await store.snapshot().mods.map(\.name) == ["Valid"])
+}
+
+@Test func removingWithoutDeletingKeepsTheFolderAndRefreshIgnoresIt() async throws {
+    let root = try makeTestRoot(); defer { removeTestRoot(root) }
+    let store = ModSupportStore(paths: appPaths(root))
+    let package = try PackageFixture(root: root)
+    try await store.install(manifest: package.manifest(), archive: package.archive)
+    let library = try await store.modsDirectoryURL()
+    let firefly = try makeLibraryMod(in: library, name: "Firefly")
+    _ = try makeLibraryMod(in: library, name: "Trailblazer")
+    _ = try await store.refreshModLibrary()
+    let id = try #require(try await store.snapshot().mods.first { $0.name == "Firefly" }?.id)
+
+    try await store.removeMod(id: id, deletingFiles: false)
+    #expect(FileManager.default.fileExists(atPath: firefly.appendingPathComponent("mod.ini").path))
+    var snapshot = try await store.snapshot()
+    #expect(snapshot.mods.map(\.name) == ["Trailblazer"])
+    #expect(snapshot.ignoredFolders == ["Firefly"])
+
+    // Refresh never adopts an ignored folder again, whatever its case.
+    let refreshed = try await store.refreshModLibrary()
+    #expect(refreshed.added == 0)
+    snapshot = try await store.snapshot()
+    #expect(snapshot.mods.map(\.name) == ["Trailblazer"])
+    #expect(snapshot.ignoredFolders == ["Firefly"])
+
+    // An ignored folder is never copied into a launch either.
+    let backend = try makeBackend(root: root)
+    try await store.setInjectionEnabled(true, acknowledgingRisk: true)
+    let trailblazer = try #require(snapshot.mods.first?.id)
+    try await store.setModEnabled(id: trailblazer, enabled: true)
+    let prepared = try #require(try await store.prepareLaunch(gameID: "starrail",
+        runtimeBundleID: fixtureRuntime, backendD3D11: backend))
+    let launchMods = try FileManager.default.contentsOfDirectory(atPath:
+        prepared.sessionDirectory.appendingPathComponent("payload/Mods").path)
+    // Launch copies are named by mod ID; the ignored folder is not among them.
+    #expect(launchMods == [trailblazer])
+    await store.discardLaunch(sessionDirectory: prepared.sessionDirectory)
+
+    // Restore brings it back disabled and clears the ignore.
+    try await store.restoreIgnoredMods()
+    snapshot = try await store.snapshot()
+    #expect(snapshot.ignoredFolders.isEmpty)
+    let restored = try #require(snapshot.mods.first { $0.name == "Firefly" })
+    #expect(!restored.enabled)
+}
+
+@Test func removingWithDeletionDeletesTheFolderWithoutIgnoringIt() async throws {
+    let root = try makeTestRoot(); defer { removeTestRoot(root) }
+    let store = ModSupportStore(paths: appPaths(root))
+    let package = try PackageFixture(root: root)
+    try await store.install(manifest: package.manifest(), archive: package.archive)
+    let library = try await store.modsDirectoryURL()
+    let firefly = try makeLibraryMod(in: library, name: "Firefly")
+    _ = try await store.refreshModLibrary()
+    let id = try #require(try await store.snapshot().mods.first?.id)
+
+    try await store.removeMod(id: id, deletingFiles: true)
+    #expect(!FileManager.default.fileExists(atPath: firefly.path))
+    #expect(try await store.snapshot().ignoredFolders.isEmpty)
+    // A new folder with the same name is a new mod.
+    _ = try makeLibraryMod(in: library, name: "Firefly")
+    #expect(try await store.refreshModLibrary().added == 1)
+}
+
+@Test func anIgnoreEndsWhenItsFolderIsGone() async throws {
+    let root = try makeTestRoot(); defer { removeTestRoot(root) }
+    let store = ModSupportStore(paths: appPaths(root))
+    let package = try PackageFixture(root: root)
+    try await store.install(manifest: package.manifest(), archive: package.archive)
+    let library = try await store.modsDirectoryURL()
+    let firefly = try makeLibraryMod(in: library, name: "Firefly")
+    _ = try await store.refreshModLibrary()
+    let id = try #require(try await store.snapshot().mods.first?.id)
+    try await store.removeMod(id: id, deletingFiles: false)
+
+    try FileManager.default.removeItem(at: firefly)
+    _ = try await store.refreshModLibrary()
+    #expect(try await store.snapshot().ignoredFolders.isEmpty)
+    _ = try makeLibraryMod(in: library, name: "Firefly")
+    #expect(try await store.refreshModLibrary().added == 1)
 }
