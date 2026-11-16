@@ -916,7 +916,22 @@ def _build_manifest(
         "files": entries,
         "sources": sources,
         "license": package["license"],
+        **_minimum_app_build_field(package),
     }
+
+
+def _minimum_app_build_field(package: dict[str, Any]) -> dict[str, int]:
+    """Optional pin: the lowest MacGacha build whose loader can run the package.
+
+    Set it for every package released on its own that relies on app behaviour
+    newer than the oldest supported app. Absent means any build may install it.
+    """
+    if "minimumAppBuild" not in package:
+        return {}
+    value = package["minimumAppBuild"]
+    if not isinstance(value, int) or isinstance(value, bool) or not 1 <= value <= 1_000_000:
+        raise PackageError("package minimumAppBuild must be an integer from 1 to 1000000")
+    return {"minimumAppBuild": value}
 
 
 def _validate_archive(
@@ -1150,6 +1165,10 @@ def _validate_manifest_header(manifest: dict[str, Any], pins: dict[str, Any] | N
     for key, value in expected.items():
         if manifest.get(key) != value:
             raise PackageError(f"manifest {key} is {manifest.get(key)!r}, expected {value!r}")
+    if "minimumAppBuild" in manifest:
+        _minimum_app_build_field(manifest)
+    if pins is not None and manifest.get("minimumAppBuild") != pins["package"].get("minimumAppBuild"):
+        raise PackageError("manifest minimumAppBuild does not match the pinned package")
     if not isinstance(manifest.get("version"), str) or not manifest["version"]:
         raise PackageError("manifest version must be a non-empty string")
     runtime_ids = manifest.get("supportedRuntimeBundleIDs")

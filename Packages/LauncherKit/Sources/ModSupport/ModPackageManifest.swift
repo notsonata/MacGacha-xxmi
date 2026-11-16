@@ -31,10 +31,15 @@ public struct ModPackageManifest: Codable, Sendable, Equatable {
     public let files: [ModPackageFile]
     public let sources: [String: String]
     public let license: String
+    /// Lowest MacGacha build (CFBundleVersion) whose loader can run this
+    /// package. Absent in older manifests, which every build accepts. A package
+    /// released on its own sets it whenever it relies on newer app behaviour.
+    public let minimumAppBuild: Int?
 
     public init(schemaVersion: Int = 1, id: String, version: String, gameID: String,
         supportedRuntimeBundleIDs: [String], runnerPath: String, injectorPath: String, payloadPath: String,
-        archiveSize: Int64, archiveSHA256: String, files: [ModPackageFile], sources: [String: String], license: String) {
+        archiveSize: Int64, archiveSHA256: String, files: [ModPackageFile], sources: [String: String], license: String,
+        minimumAppBuild: Int? = nil) {
         self.schemaVersion = schemaVersion
         self.id = id
         self.version = version
@@ -48,6 +53,7 @@ public struct ModPackageManifest: Codable, Sendable, Equatable {
         self.files = files
         self.sources = sources
         self.license = license
+        self.minimumAppBuild = minimumAppBuild
     }
 }
 
@@ -59,6 +65,9 @@ extension ModPackageManifest {
 
     func validate() throws {
         guard schemaVersion == 1 else { throw LauncherError.io("Unsupported mod package schema") }
+        if let minimumAppBuild, !(1...1_000_000).contains(minimumAppBuild) {
+            throw LauncherError.io("Invalid mod package minimum app build")
+        }
         _ = try SafeIdentifier(id)
         _ = try SafeIdentifier(version)
         _ = try SafeIdentifier(gameID)
@@ -120,5 +129,16 @@ extension ModPackageManifest {
 
     private static func isControl(_ scalar: Unicode.Scalar) -> Bool {
         scalar.value < 32 || scalar.value == 127
+    }
+}
+
+extension ModPackageManifest {
+    /// Fails closed when this app build is older than the package requires.
+    /// An unknown app build (nil) is only accepted by packages without a minimum.
+    func requireCompatible(appBuild: Int?) throws {
+        guard let minimumAppBuild else { return }
+        guard let appBuild, appBuild >= minimumAppBuild else {
+            throw LauncherError.modPackageNeedsNewerApp
+        }
     }
 }

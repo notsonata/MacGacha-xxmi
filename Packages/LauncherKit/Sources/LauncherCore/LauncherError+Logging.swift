@@ -34,6 +34,7 @@ public extension LauncherError {
         case .rosettaMissing: "rosettaMissing"
         case .rosettaInstallerUnavailable: "rosettaInstallerUnavailable"
         case .installVolumeUnavailable: "installVolumeUnavailable"
+        case .modPackageNeedsNewerApp: "modPackageNeedsNewerApp"
         case .cancelled: "cancelled"
         case .journalCorrupt: "journalCorrupt"
         }

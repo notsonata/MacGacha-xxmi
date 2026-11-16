@@ -30,6 +30,7 @@ extension LauncherError {
         case .gameEditionUnknown: String(localized: "MacGacha could not identify this folder’s edition. Select an official installation with its launcher configuration.")
         case .gameDistributionUnsupported: String(localized: "This distribution, including Bilibili, is not supported yet. Use an official Global or Mainland China installation.")
         case .installVolumeUnavailable: String(localized: "The game drive is unavailable. Reconnect it, then resume the operation.")
+        case .modPackageNeedsNewerApp: String(localized: "This XXMI package needs a newer MacGacha. Update MacGacha, then install the package again.")
         case .cancelled: String(localized: "The operation was cancelled.")
         case .journalCorrupt: String(localized: "The saved operation could not be recovered. Check Diagnostics for details.")
         }

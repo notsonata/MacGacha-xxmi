@@ -711,6 +711,27 @@ class PackageTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_minimum_app_build_pin_is_written_and_enforced(self):
+        plain = self.fixture.build(self.root / "plain")
+        self.assertNotIn("minimumAppBuild", plain)
+        self.fixture.pins["package"]["minimumAppBuild"] = 7
+        self.fixture.pins_path.write_text(json.dumps(self.fixture.pins, indent=2) + "\n", encoding="utf-8")
+        output = self.root / "pinned"
+        manifest = self.fixture.build(output)
+        self.assertEqual(manifest["minimumAppBuild"], 7)
+        xxmi_package.verify_package(output, pins_path=self.fixture.pins_path)
+        # A manifest edited to a different minimum no longer matches its pins.
+        path = output / "manifest.json"
+        edited = json.loads(path.read_text(encoding="utf-8"))
+        edited["minimumAppBuild"] = 6
+        path.write_text(json.dumps(edited), encoding="utf-8")
+        with self.assertRaisesRegex(xxmi_package.PackageError, "minimumAppBuild"):
+            xxmi_package.verify_package(output, pins_path=self.fixture.pins_path)
+        self.fixture.pins["package"]["minimumAppBuild"] = 0
+        self.fixture.pins_path.write_text(json.dumps(self.fixture.pins, indent=2) + "\n", encoding="utf-8")
+        with self.assertRaisesRegex(xxmi_package.PackageError, "minimumAppBuild"):
+            self.fixture.build(self.root / "invalid")
+
     def test_builds_deterministic_manifest_and_archive(self):
         first = self.root / "out-a"
         second = self.root / "out-b"

@@ -30,6 +30,8 @@ public enum LauncherError: Error, Sendable, Equatable {
     case rosettaMissing
     case rosettaInstallerUnavailable
     case installVolumeUnavailable
+    /// A mod package requires a newer MacGacha build than this one.
+    case modPackageNeedsNewerApp
     case cancelled
     case journalCorrupt(String)
 }
