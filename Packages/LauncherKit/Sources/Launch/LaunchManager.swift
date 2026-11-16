@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // MacGacha — https://github.com/deruta74/MacGacha — see LICENSE and NOTICE (additional term under GPL section 7(b)).
+import Darwin
 import Foundation
 import LauncherCore
 import GameLibrary
@@ -13,6 +14,14 @@ public struct LaunchStartupResult: Sendable {
         self.sessions = sessions; self.unresolved = unresolved
     }
 }
+
+/// Registry half of ZZZ native loading. `LaunchPreparation` provides it; a
+/// preparation without it cannot own overrides, so Mods OFF has nothing to
+/// reconcile and native Mods ON fails closed.
+public protocol LaunchNativeProxyOverridePreparing: Sendable {
+    @discardableResult func reconcileNativeProxyOverrides(prefix: URL, wineBinary: URL, enabled: Bool) async throws -> NativeProxyOverrideOutcome
+}
+extension LaunchPreparation: LaunchNativeProxyOverridePreparing {}
 
 /// Owns supervision independently of any UI observer. Cancelling or discarding the
 /// event stream detaches that observer; it never cancels the game or its restore.
@@ -30,10 +39,14 @@ public actor LaunchManager {
     private let inspector: any ProcessInspector
     private let runner: any ProcessRunner
     private let clock: any Clock<Duration>
+    private let now: @Sendable () -> Date
+    private let playTimeInstant: @Sendable () throws -> (bootSessionUUID: String, seconds: Double)
     private let gameMode: (any GameModeProviding)?
     private let displayProbe: any DisplayProbe
     private let proxyFactory: ProxyFactory
     private let injectionPreparation: (any LaunchInjectionPreparing)?
+    private let nativeProxyFiles: NativeProxyFiles
+    private let nativeLogHarvester: NativeProxyLogHarvester
     private let baseEnvironment: [String: String]
     private let journalFileOps: any FileOps
     private let hideHooks: LaunchFileHooks
@@ -58,6 +71,7 @@ public actor LaunchManager {
         let pin: RuntimePin
         var log: SessionLog?
         var lifecycleLog: SessionLifecycleLog?
+        var recoveredLogEvidenceReady = false
         var proxy: (any LaunchSessionProxy)?
         // Process lifetime is independent of file recovery and journal durability.
         // Reattached UI observers must stop their window timers at verified end.
@@ -67,8 +81,12 @@ public actor LaunchManager {
         var lastConfirmedElapsed: Duration = .zero
         var qualificationTask: Task<Void, Never>?
         var runningAnnounced = false
+        var observedGameInProcess = false
+        var lifeObservationRevision: UInt64 = 0
         var endOutcome = "while MacGacha was closed"
         var restoreEntryCount = 0
+        // Set once the native diagnostics were attempted; retries must not repeat it.
+        var nativeDiagnosticsHarvested = false
         var ownedWrapper: ProcessIdentity?
         var fpsInjector: ResolvedFpsInjector?
         var fpsAttempted = false
@@ -93,7 +111,10 @@ public actor LaunchManager {
         preparation: any LaunchPreparing, spawner: any ProcessSpawner, inspector: any ProcessInspector,
         runner: any ProcessRunner, clock: any Clock<Duration>, log: EventLog? = nil,
         displayProbe: any DisplayProbe = SystemDisplayProbe(), gameMode: (any GameModeProviding)? = nil,
-        injectionPreparation: (any LaunchInjectionPreparing)? = nil) {
+        injectionPreparation: (any LaunchInjectionPreparing)? = nil,
+        now: @escaping @Sendable () -> Date = Date.init) {
+        self.now = now
+        self.playTimeInstant = Self.currentPlayTimeInstant
         self.gameMode = gameMode ?? GameModeHelper(paths: paths)
         self.eventLog = log ?? EventLog(directory: paths.logs)
         self.sessionLogWriter = Self.makeSessionLogWriter(beforeWrite: {})
@@ -106,6 +127,8 @@ public actor LaunchManager {
         self.sessionProvenance = Self.currentSessionProvenance
         self.proxyFactory = { hosts, log in try await SessionProxy.start(blockedHosts: hosts, log: log) }
         self.injectionPreparation = injectionPreparation
+        self.nativeProxyFiles = NativeProxyFiles()
+        self.nativeLogHarvester = NativeProxyLogHarvester()
     }
 
     package init(paths: AppPaths, runtimes: any LaunchRuntimeProviding, prefixes: any LaunchPrefixProviding,
@@ -117,9 +140,15 @@ public actor LaunchManager {
         beforeRecoveryRead: @escaping @Sendable () async throws -> Void = {},
         recipeOverrides: [String: LaunchRecipe] = [:],
         sessionProvenance: @escaping @Sendable () throws -> (bootSessionUUID: String, sessionStartTime: UInt64) = LaunchManager.currentSessionProvenance,
+        playTimeInstant: @escaping @Sendable () throws -> (bootSessionUUID: String, seconds: Double) = LaunchManager.currentPlayTimeInstant,
         beforeSessionLogWrite: @escaping @Sendable () throws -> Void = {},
         fpsInjectorStatus: @escaping @Sendable (ProcessIdentity) throws -> SessionChildStatus = OwnedSessionChild.systemStatus,
-        injectionPreparation: (any LaunchInjectionPreparing)? = nil) {
+        injectionPreparation: (any LaunchInjectionPreparing)? = nil,
+        nativeProxyFiles: NativeProxyFiles = NativeProxyFiles(),
+        nativeLogHarvester: NativeProxyLogHarvester = NativeProxyLogHarvester(),
+        now: @escaping @Sendable () -> Date = Date.init) {
+        self.now = now
+        self.playTimeInstant = playTimeInstant
         self.gameMode = gameMode
         self.eventLog = log ?? EventLog(directory: paths.logs)
         self.sessionLogWriter = Self.makeSessionLogWriter(beforeWrite: beforeSessionLogWrite)
@@ -131,6 +160,8 @@ public actor LaunchManager {
         self.hideHooks = hideHooks; self.beforeJournalRead = beforeJournalRead; self.beforeRecoveryRead = beforeRecoveryRead
         self.sessionProvenance = sessionProvenance
         self.injectionPreparation = injectionPreparation
+        self.nativeProxyFiles = nativeProxyFiles
+        self.nativeLogHarvester = nativeLogHarvester
     }
 
     private enum SessionLogWork: Sendable {
@@ -155,6 +186,17 @@ public actor LaunchManager {
     package nonisolated static func currentSessionProvenance() throws -> (bootSessionUUID: String, sessionStartTime: UInt64) {
         // Called on BlockingIO before the first durable snapshot and spawn.
         (try SystemProcessInspector.bootSessionUUID(), UInt64(Date().timeIntervalSince1970 * 1_000_000))
+    }
+
+    /// Boot-scoped monotonic seconds include sleep and survive launcher restarts.
+    /// Read with boot identity on BlockingIO, never on a cooperative worker.
+    package nonisolated static func currentPlayTimeInstant() throws -> (bootSessionUUID: String, seconds: Double) {
+        let boot = try SystemProcessInspector.bootSessionUUID()
+        var instant = timespec()
+        guard clock_gettime(CLOCK_MONOTONIC_RAW, &instant) == 0 else {
+            throw LauncherError.io("Monotonic play time clock unavailable")
+        }
+        return (boot, Double(instant.tv_sec) + Double(instant.tv_nsec) / 1e9)
     }
 
     public func launch(game: GameDefinition, installRoot: URL, gameBuild: String) -> AsyncStream<LaunchEvent> {
@@ -344,6 +386,10 @@ public actor LaunchManager {
             // Wine helper can be armed while MacGacha is still preparing it.
             let injection = try await prepareInjection(game: game, settings: settings, bundle: bundle,
                 prefix: prefix, context: context)
+            // Still idle: no helper has started. Mods OFF also reconciles so that
+            // overrides this app owns are removed; unowned OFF makes no Wine call.
+            try await reconcileNativeProxyOverrides(game: game, bundle: bundle, prefix: prefix,
+                native: injection?.loading == .nativeProxy, context: context)
             let original = context.session, log = context.log, hideHooks = hideHooks, beforeJournalRead = beforeJournalRead
             let (hiddenSnapshot, hideResult) = try await BlockingIO.run {
                 var snapshot = original
@@ -380,13 +426,20 @@ public actor LaunchManager {
                 event("Display selected", game: game.id, metadata: ["display": selection])
             }
             let processLaunch: ResolvedLaunch
-            if let injection {
-                processLaunch = try injection.wrap(resolved,
-                    expectedGamePath: WinePath.windowsPath(for: recipe.executable.resolved(against: installRoot)))
+            let expectedGamePath = WinePath.windowsPath(for: recipe.executable.resolved(against: installRoot))
+            if let injection, injection.loading == .nativeProxy {
+                // The game loads the placed payload itself; its command is unchanged.
+                processLaunch = try injection.nativeLaunch(resolved, expectedGamePath: expectedGamePath)
+            } else if let injection {
+                processLaunch = try injection.wrap(resolved, expectedGamePath: expectedGamePath)
             } else {
                 processLaunch = resolved
             }
             stage = .spawn; events.yield(.stage(stage)); note(context, "stage spawn")
+            if let injection, injection.loading == .nativeProxy {
+                // After every component copy and hide, before anything is spawned.
+                try await placeNativeProxy(context, configuration: injection.configuration)
+            }
             context.session.state = .spawning; try await persist(context.session)
             let spawner = spawner, output = context.log?.processOutput ?? .discard
             let process = try await BlockingIO.run {
@@ -404,7 +457,11 @@ public actor LaunchManager {
             event("Launch failed", game: game.id, level: .error, metadata: Self.failureMetadata(error, stage: stage))
             if let context = contexts[game.id] {
                 // hide() may have durably recorded more entries before throwing.
-                if let persisted = try? await read(game: game.id), persisted.sessionID == context.session.sessionID { context.session = persisted }
+                if var persisted = try? await read(game: game.id), persisted.sessionID == context.session.sessionID {
+                    // The in-memory native record is never older than the journal's.
+                    persisted.nativeProxy = context.session.nativeProxy
+                    context.session = persisted
+                }
                 if let owned = context.ownedWrapper {
                     if !context.session.processes.contains(owned) { context.session.processes.append(owned) }
                     context.session.processGroupIDs = (context.session.processGroupIDs ?? []).union([owned.pid])
@@ -451,6 +508,19 @@ public actor LaunchManager {
             let prepared = try await BlockingIO.run {
                 try LaunchInjection.validate(configuration, paths: paths, prefix: prefix, bundle: bundle, game: game)
             }
+            // New ZZZ sessions load natively on Direct3D 11 only. A hook-runner
+            // ZZZ snapshot is refused rather than started through another route;
+            // older ZZZ hook journals remain recoverable.
+            if game.family == .zzz {
+                guard prepared.loading == .nativeProxy else {
+                    throw LauncherError.io("Zenless Zone Zero mods require a native loading snapshot")
+                }
+                guard !settings.directX12 else {
+                    throw LauncherError.io("Zenless Zone Zero mods require DirectX 12 to be turned off")
+                }
+            } else if prepared.loading == .nativeProxy {
+                throw LauncherError.io("Native mod loading is established only for Zenless Zone Zero")
+            }
             // The snapshot must be durable before any Wine helper can start.
             context.session.injection = prepared.configuration
             try await persist(context.session)
@@ -466,9 +536,63 @@ public actor LaunchManager {
         }
     }
 
+    private func reconcileNativeProxyOverrides(game: GameDefinition, bundle: InstalledRuntimeBundle, prefix: URL,
+        native: Bool, context: Context) async throws {
+        guard game.family == .zzz, game.region == .global else { return }
+        guard let reconciler = preparation as? any LaunchNativeProxyOverridePreparing else {
+            if native { throw LauncherError.io("Native mod loading is unavailable") }
+            return
+        }
+        let outcome = try await reconciler.reconcileNativeProxyOverrides(prefix: prefix, wineBinary: bundle.wineBinary, enabled: native)
+        guard outcome.action != .unchanged || !outcome.residualKeys.isEmpty else { return }
+        let action = switch outcome.action { case .unchanged: "unchanged"; case .applied: "applied"; case .removed: "removed" }
+        note(context, "native proxy overrides \(action) residual=\(outcome.residualKeys.count)")
+        event("Native proxy overrides reconciled", game: game.id,
+            metadata: ["action": action, "residualKeys": String(outcome.residualKeys.count)])
+    }
+
+    /// Write-ahead placement through the journal. The in-memory session keeps
+    /// the transaction's newest record even when a journal write fails after a
+    /// disk mutation, so restore always sees every file it may own.
+    private func placeNativeProxy(_ context: Context, configuration: LaunchInjectionConfiguration) async throws {
+        let paths = paths, journalFileOps = journalFileOps, beforeJournalRead = beforeJournalRead, files = nativeProxyFiles
+        let original = context.session
+        let (placed, result) = try await BlockingIO.run {
+            var snapshot = original
+            var record: NativeProxyRecord?
+            let journal = LaunchJournal(paths: paths, fileOps: journalFileOps, sessionOwned: true, beforeRead: beforeJournalRead)
+            let result = Result {
+                try files.place(sessionDirectory: configuration.sessionDirectory.standardizedFileURL,
+                    prefix: original.prefix.standardizedFileURL, sessionID: original.sessionID, record: &record) { next in
+                    var candidate = snapshot
+                    candidate.nativeProxy = next
+                    try Self.writeNativeOwnership(candidate, journal: journal)
+                    snapshot = candidate
+                }
+            }
+            snapshot.nativeProxy = record
+            return (snapshot, result)
+        }
+        context.session = placed
+        note(context, placed.nativeProxy == nil ? "native proxy not placed" : "native proxy placed")
+        try result.get()
+        event("Native proxy placed", game: placed.game)
+    }
+
+    /// The only writer of native ownership: a native transaction step. Every
+    /// other journal write keeps whatever native record is already durable.
+    private nonisolated static func writeNativeOwnership(_ session: LaunchSession, journal: LaunchJournal) throws {
+        guard let prior = try journal.read(game: session.game), prior.sessionID == session.sessionID else {
+            throw LauncherError.io("The launch journal is missing or belongs to another session")
+        }
+        guard prior.hides.allSatisfy({ durable in session.hides.contains { $0.path == durable.path } }) else {
+            throw LauncherError.io("Refusing to replace newer launch recovery ownership")
+        }
+        try journal.write(session)
+    }
+
     private func watch(game: String, executable: String) async {
         guard let context = contexts[game] else { return }
-        if context.session.state == .running { await startQualificationMonitor(context) }
         let watcher = SessionWatcher(runtimesRoot: paths.runtimes, inspector: inspector, runner: runner, clock: clock)
         let reaper = context.ownedWrapper.map { OwnedWrapperReaper(identity: $0) }
         let supervisionClock = clock
@@ -476,6 +600,8 @@ public actor LaunchManager {
         defer { reaper?.continueReaping(clock: reaperClock) }
         while true {
             do {
+                try await prepareRecoveredLog(context)
+                if context.session.state == .running { await startQualificationMonitor(context) }
                 var watching = context.session
                 watching.state = context.watchPhase
                 try await watcher.watch(session: watching, executable: executable, ownedWrapper: context.ownedWrapper, ownedReaper: reaper,
@@ -483,6 +609,7 @@ public actor LaunchManager {
                     try await self.observed(game: game, processes: processes)
                 }
                 context.hasEnded = true
+                await checkpointPlayTimeEnd(context)
                 context.fpsWorker?.cancel()
                 context.endOutcome = context.ready ? "normal" : "before ready"
                 context.session.state = .ending; try await persist(context.session)
@@ -540,16 +667,103 @@ public actor LaunchManager {
             let timer = AnyLaunchClock(timerClock)
             context.runningTimer = { timer.now }
         }
+        if !processes.isEmpty { await checkpointPlayTimeLife(context) }
         context.session.processes = Array(Set(context.session.processes + processes)).sorted { $0.pid < $1.pid }
         try await persist(context.session)
-        if !processes.isEmpty { await startQualificationMonitor(context) }
+        if !processes.isEmpty {
+            enableRecoveredLog(context)
+            await startQualificationMonitor(context)
+        }
         if !context.runningAnnounced, let process = processes.sorted(by: { $0.pid < $1.pid }).first {
             context.runningAnnounced = true
             note(context, "game process detected: pid \(process.pid)")
-            event("Game running", game: game, metadata: ["pid": String(process.pid)])
+            event("Game running", game: game, metadata: ["pid": String(process.pid), "playID": PlayTimeStore.playID(for: context.session.sessionID)])
             context.continuation?.yield(.running)
         }
         if !processes.isEmpty { try await startFpsInjector(context) }
+    }
+
+    private func checkpointPlayTimeLife(_ context: Context) async {
+        context.observedGameInProcess = true
+        guard context.session.verifiedEndedAt == nil else { return }
+        context.lifeObservationRevision &+= 1
+        let revision = context.lifeObservationRevision, date = now(), readInstant = playTimeInstant
+        let instant = try? await BlockingIO.run { try readInstant() }
+        guard contexts[context.session.game] === context, !context.hasEnded,
+            context.session.verifiedEndedAt == nil, context.lifeObservationRevision == revision else { return }
+        let monotonic = instant.flatMap { value in
+            value.bootSessionUUID == context.session.bootSessionUUID && value.seconds.isFinite && value.seconds >= 0 ? value.seconds : nil
+        }
+        if let monotonic, let previous = context.session.lastLifeMonotonicSeconds, monotonic < previous { return }
+        if context.session.runningSince == nil {
+            context.session.runningSince = date
+            context.session.runningMonotonicSeconds = monotonic
+        }
+        context.session.lastLifeAt = date
+        context.session.lastLifeMonotonicSeconds = monotonic
+    }
+
+    private func checkpointPlayTimeEnd(_ context: Context) async {
+        guard context.session.verifiedEndedAt == nil else { return }
+        let session = context.session, readInstant = playTimeInstant
+        let observed = context.observedGameInProcess
+        let end = now()
+        let seconds: Double?
+        if observed {
+            let instant = try? await BlockingIO.run { try readInstant() }
+            if let start = session.runningMonotonicSeconds, let instant,
+                instant.bootSessionUUID == session.bootSessionUUID,
+                instant.seconds.isFinite, instant.seconds >= start {
+                seconds = instant.seconds - start
+            } else { seconds = nil }
+        } else {
+            var evidence = max(session.supervisedPlaySeconds ?? 0, session.confirmedRunningSeconds ?? 0)
+            if let start = session.runningMonotonicSeconds, let last = session.lastLifeMonotonicSeconds, last >= start {
+                evidence = max(evidence, last - start)
+            } else if let start = session.runningSince, let last = session.lastLifeAt, last <= end {
+                evidence = max(evidence, last.timeIntervalSince(start))
+            }
+            if let start = session.runningSince, let modified = session.sessionLogEvidenceAt, modified <= end {
+                evidence = max(evidence, modified.timeIntervalSince(start))
+            }
+            seconds = min(evidence, PlayTimeStore.recoveryWindowSeconds)
+        }
+        context.session.verifiedEndedAt = end
+        context.session.playTimeEndRecovered = !observed
+        context.session.supervisedPlaySeconds = seconds
+    }
+
+    private func prepareRecoveredLog(_ context: Context) async throws {
+        guard context.lifecycleLog == nil, !context.recoveredLogEvidenceReady,
+            let url = context.session.sessionLogURL else { return }
+        var snapshot = context.session
+        if snapshot.sessionLogEvidenceCaptured != true {
+            let paths = paths, game = snapshot.game, discoveredAt = now()
+            let modified = try? await BlockingIO.run {
+                try SessionLog.lastModificationDate(paths: paths, game: game, url: url)
+            }
+            snapshot.sessionLogEvidenceAt = modified.flatMap { $0 <= discoveredAt ? $0 : nil }
+            snapshot.sessionLogEvidenceCaptured = true
+            // Retain the first read through failed or uncertain publication.
+            // Readiness remains false until the checkpoint is durably saved.
+            context.session.sessionLogEvidenceAt = snapshot.sessionLogEvidenceAt
+            context.session.sessionLogEvidenceCaptured = true
+        }
+        // Re-publish even an existing marker to resolve uncertain writes before
+        // any cap, ticker or lifecycle append can change the evidence inode.
+        try await persist(snapshot)
+        context.session = snapshot
+        context.recoveredLogEvidenceReady = true
+        enableRecoveredLog(context)
+    }
+
+    private func enableRecoveredLog(_ context: Context) {
+        guard context.recoveredLogEvidenceReady, context.lifecycleLog == nil, let url = context.session.sessionLogURL,
+            url.deletingLastPathComponent().standardizedFileURL == paths.logs.standardizedFileURL,
+            LaunchLogFiles.parseName(url.lastPathComponent)?.game == context.session.game else { return }
+        let log = SessionLifecycleLog(recovering: url, ticker: ClockSessionLogTicker(clock: clock))
+        context.lifecycleLog = log
+        sessionLogWriter.post(.cap(log), bytes: 0)
     }
 
     private func startQualificationMonitor(_ context: Context) async {
@@ -677,19 +891,45 @@ public actor LaunchManager {
         note(context, "stage restore")
         context.continuation?.yield(.stage(.restore))
         let paths = paths, journalFileOps = journalFileOps, beforeJournalRead = beforeJournalRead, hideHooks = hideHooks
+        let files = nativeProxyFiles
         if context.finalization == nil {
             let original = context.session
+            // After verified end and before the native files are removed.
+            await harvestNativeDiagnostics(context)
             do {
-                let (session, outcome) = try await BlockingIO.run {
+                let (session, result) = try await BlockingIO.run { () -> (LaunchSession, Result<RestoreOutcome, any Error>) in
                     var snapshot = original
                     let journal = LaunchJournal(paths: paths, fileOps: journalFileOps, sessionOwned: true, beforeRead: beforeJournalRead)
-                    let outcome = try HiddenFiles(hooks: hideHooks).restore(session: &snapshot, journal: journal, retainResolvedJournal: true)
+                    // Native files first: until they are resolved, the journal,
+                    // hidden game files and snapshot retention all stay owned.
+                    if original.nativeProxy != nil {
+                        var record = original.nativeProxy
+                        let native = files.restore(prefix: original.prefix, sessionID: original.sessionID, record: &record) { next in
+                            var candidate = snapshot
+                            candidate.nativeProxy = next
+                            try Self.writeNativeOwnership(candidate, journal: journal)
+                            snapshot = candidate
+                        }
+                        snapshot.nativeProxy = record
+                        if native != .clean {
+                            let reason = if case .conflict = native {
+                                "Mod files in the game prefix changed; launch recovery was retained"
+                            } else { "Mod files in the game prefix could not be restored yet" }
+                            snapshot.state = .recoveryPending
+                            // Best effort: the durable record is already sufficient to retry.
+                            try? Self.writeNativeOwnership(snapshot, journal: journal)
+                            return (snapshot, .success(.pending(reason: reason)))
+                        }
+                    }
+                    let outcome = Result { try HiddenFiles(hooks: hideHooks).restore(session: &snapshot, journal: journal, retainResolvedJournal: true) }
                     return (snapshot, outcome)
                 }
                 context.session = session
+                let outcome = try result.get()
                 if Self.resolved(outcome, session: session) {
                     context.finalization = (session, outcome)
                 } else {
+                    if session.nativeProxy != nil { note(context, "native proxy retained for recovery") }
                     restored(context, outcome: outcome)
                     context.continuation?.yield(.restored(outcome))
                     // Recovery can produce more lifecycle lines on a later retry.
@@ -705,6 +945,7 @@ public actor LaunchManager {
         }
         guard let (session, outcome) = context.finalization else { preconditionFailure("Missing restore finalization") }
         do {
+            try await recordPlayTime(session)
             try await BlockingIO.run {
                 if case .conflict(let movedTo) = outcome {
                     try RecoveryNoticeStore(paths: paths).record(RecoveryNotice(id: session.sessionID, game: session.game,
@@ -737,6 +978,47 @@ public actor LaunchManager {
         return outcome
     }
 
+    /// Copies the loader's fixed runtime logs into the launcher log directory
+    /// before `NativeProxyFiles.restore` removes them. Best effort: nothing here
+    /// throws, and no outcome changes whether the native files are restored.
+    private func harvestNativeDiagnostics(_ context: Context) async {
+        guard !context.nativeDiagnosticsHarvested, let record = context.session.nativeProxy else { return }
+        let game = context.session.game
+        guard let lifecycleLog = context.lifecycleLog, lifecycleLog.url.pathExtension == "log",
+            lifecycleLog.url.deletingLastPathComponent().standardizedFileURL == paths.logs.standardizedFileURL else {
+            // Session logs are off (or unrecoverable): there is no trusted destination.
+            context.nativeDiagnosticsHarvested = true
+            event("Native diagnostics not exported", game: game, metadata: ["reason": "noSessionLog"])
+            return
+        }
+        let stem = lifecycleLog.url.deletingPathExtension().lastPathComponent
+        let session = context.session, logs = paths.logs, harvester = nativeLogHarvester
+        guard let items = try? await BlockingIO.run({
+            harvester.harvest(record: record, prefix: session.prefix.standardizedFileURL, sessionID: session.sessionID,
+                stem: stem, logs: logs)
+        }) else { return }
+        context.nativeDiagnosticsHarvested = true
+        for item in items {
+            let label = "native diagnostics: \(item.name)"
+            switch item.status {
+            case .exported(let bytes):
+                note(context, "\(label) exported as \(item.destination ?? "?") bytes=\(bytes)")
+                event("Native diagnostics exported", game: game, metadata: ["file": item.name, "bytes": String(bytes)])
+            case .missing:
+                note(context, "\(label) not present")
+            case .tooLarge(let bytes):
+                note(context, "\(label) not exported: larger than \(NativeProxyLogHarvester.maximumBytes) bytes (\(bytes))")
+                event("Native diagnostics not exported", game: game, level: .warning, metadata: ["file": item.name, "reason": "tooLarge"])
+            case .unsafe:
+                note(context, "\(label) not exported: not a regular single-link file")
+                event("Native diagnostics not exported", game: game, level: .warning, metadata: ["file": item.name, "reason": "unsafe"])
+            case .failed:
+                note(context, "\(label) not exported: copy failed")
+                event("Native diagnostics not exported", game: game, level: .warning, metadata: ["file": item.name, "reason": "ioError"])
+            }
+        }
+    }
+
     private func event(_ message: String, game: String, level: EventLog.Level = .info, metadata: [String: String] = [:]) {
         var metadata = metadata
         metadata["game"] = Recipes.recipe(for: game) == nil ? "unknown" : game
@@ -752,6 +1034,12 @@ public actor LaunchManager {
         // already publishing into this snapshot before harvesting it.
         if context.session.endLogged != true, let apply = liveApplies[context.session.game] {
             _ = await apply.result
+        }
+        // Checkpoint play time before the mod finish: a finish that keeps failing
+        // during recovery must not push the recorded end time later.
+        if context.session.verifiedEndedAt == nil {
+            await checkpointPlayTimeEnd(context)
+            try await persist(context.session)
         }
         // Harvest before the end is durable: a failed finish leaves endLogged
         // unset so the next supervision or recovery attempt retries it.
@@ -772,7 +1060,14 @@ public actor LaunchManager {
                 event("Automatic cleanup proof unavailable", game: session.game, level: .warning)
             }
         }
-        guard context.session.endLogged != true else { return }
+        // This checkpoint remains in the journal until accounting and file recovery
+        // both finish. A crash cannot replace the interval with a later detection.
+        do { try await recordPlayTime(context.session) }
+        catch { event("Play time recording deferred", game: context.session.game, level: .warning) }
+        if context.session.endLogged == true {
+            enableRecoveredLog(context)
+            return
+        }
         var snapshot = context.session
         snapshot.endLogged = true
         snapshot.startupPending = false
@@ -780,10 +1075,25 @@ public actor LaunchManager {
         // never produce another end notification on the next recovery attempt.
         try await persist(snapshot)
         context.session.endLogged = true
+        enableRecoveredLog(context)
         let outcome = context.endOutcome
         note(context, outcome == "while MacGacha was closed"
             ? "Session ended while MacGacha was closed" : "session ended: \(outcome)")
-        event("Session ended", game: context.session.game, metadata: ["outcome": outcome])
+        let seconds = PlayTimeStore.creditedSeconds(runningSince: context.session.runningSince,
+            endedAt: context.session.verifiedEndedAt ?? now(), recovered: context.session.playTimeEndRecovered ?? true,
+            supervisedSeconds: context.session.supervisedPlaySeconds) ?? 0
+        event("Session ended", game: context.session.game, metadata: ["outcome": outcome,
+            "playID": PlayTimeStore.playID(for: context.session.sessionID), "playSeconds": String(seconds)])
+    }
+
+    private func recordPlayTime(_ session: LaunchSession) async throws {
+        guard let end = session.verifiedEndedAt, session.runningSince != nil else { return }
+        let paths = paths
+        try await BlockingIO.run {
+            try PlayTimeStore(paths: paths).record(sessionID: session.sessionID, game: session.game,
+                runningSince: session.runningSince, endedAt: end, recovered: session.playTimeEndRecovered ?? true,
+                supervisedSeconds: session.supervisedPlaySeconds)
+        }
     }
 
     private func restored(_ context: Context, outcome: RestoreOutcome) {
@@ -815,8 +1125,27 @@ public actor LaunchManager {
                     if !persisted.processes.contains(owned) { persisted.processes.append(owned) }
                     persisted.processGroupIDs = (persisted.processGroupIDs ?? []).union([owned.pid])
                 }
+                // Durable hide ownership wins, but a failed first checkpoint must
+                // not discard the running/end observations already made here.
+                if persisted.sessionLogEvidenceCaptured != true, context.session.sessionLogEvidenceCaptured == true {
+                    persisted.sessionLogEvidenceCaptured = true
+                    persisted.sessionLogEvidenceAt = context.session.sessionLogEvidenceAt
+                }
+                persisted.runningSince = persisted.runningSince ?? context.session.runningSince
+                persisted.runningMonotonicSeconds = persisted.runningMonotonicSeconds ?? context.session.runningMonotonicSeconds
+                if let last = context.session.lastLifeAt {
+                    persisted.lastLifeAt = last
+                    persisted.lastLifeMonotonicSeconds = context.session.lastLifeMonotonicSeconds
+                }
+                if persisted.verifiedEndedAt == nil {
+                    persisted.verifiedEndedAt = context.session.verifiedEndedAt
+                    persisted.playTimeEndRecovered = context.session.playTimeEndRecovered
+                    persisted.supervisedPlaySeconds = context.session.supervisedPlaySeconds
+                }
                 persisted.state = .recoveryPending
                 persisted.startupPending = !context.hasEnded && context.watchPhase == .spawning
+                // persist keeps the durable native record; memory keeps the newest.
+                persisted.nativeProxy = context.session.nativeProxy
                 try await persist(persisted)
                 context.session = persisted
             }
@@ -829,10 +1158,14 @@ public actor LaunchManager {
         let paths = paths, journalFileOps = journalFileOps, beforeJournalRead = beforeJournalRead
         try await BlockingIO.run {
             let journal = LaunchJournal(paths: paths, fileOps: journalFileOps, sessionOwned: true, beforeRead: beforeJournalRead)
+            var session = session
             if let prior = try journal.read(game: session.game), prior.sessionID == session.sessionID {
                 guard prior.hides.allSatisfy({ durable in session.hides.contains { $0.path == durable.path } }) else {
                     throw LauncherError.io("Refusing to replace newer launch recovery ownership")
                 }
+                // Native ownership changes only through its transaction steps. A
+                // stale or racing snapshot can neither resurrect nor drop it.
+                session.nativeProxy = prior.nativeProxy
             }
             try journal.write(session)
         }
@@ -983,18 +1316,19 @@ public actor LaunchManager {
                 let context = Context(session: snapshot, lock: lock, pin: pin)
                 contexts[game] = context
                 unresolvedStartup.remove(game)
-                if let url = snapshot.sessionLogURL,
-                    url.deletingLastPathComponent().standardizedFileURL == paths.logs.standardizedFileURL,
-                    LaunchLogFiles.parseName(url.lastPathComponent)?.game == game {
-                    let log = SessionLifecycleLog(recovering: url, ticker: ClockSessionLogTicker(clock: clock))
-                    context.lifecycleLog = log
-                    sessionLogWriter.post(.cap(log), bytes: 0)
-                }
+                // Capture once before capping every recovered log, including
+                // helper-only and uncertain process states.
                 do {
+                    try await prepareRecoveredLog(context)
                     // Spawning without identities may precede a delayed Wine
                     // wrapper. Only startup's complete absence grace can end it.
-                    let present = try await alive(snapshot)
-                    let starting = snapshot.state == .spawning || snapshot.startupPending == true || present
+                    let present = try await presence(snapshot)
+                    if present.gameRunning {
+                        await checkpointPlayTimeLife(context)
+                        try await persist(context.session)
+                        enableRecoveredLog(context)
+                    }
+                    let starting = snapshot.state == .spawning || snapshot.startupPending == true || present.alive
                     if starting {
                         guard let executable = Self.executable(snapshot) else {
                             await pending(context, reason: "The snapshot's executable could not be confirmed"); continue
@@ -1026,18 +1360,24 @@ public actor LaunchManager {
     }
 
     private func alive(_ session: LaunchSession) async throws -> Bool {
+        try await presence(session).alive
+    }
+
+    private func presence(_ session: LaunchSession) async throws -> (alive: Bool, gameRunning: Bool) {
         let inspector = inspector, scope = session.inspectionScope(runtimesRoot: paths.runtimes)
+        let name = Self.executable(session).map(Self.executableLeaf)
         return try await BlockingIO.run {
             let processes = try inspector.processes(environmentContains: "WINEPREFIX", value: session.prefix.path, scope: scope)
-            if session.processes.contains(where: { inspector.isAlive($0) }) { return true }
-            // Any prefix-matching helper can still start the game after a crash
-            // before the wrapper identity was journaled.
-            return !processes.isEmpty
+            // A helper or reused recovery watcher does not prove a live game.
+            // Only positive executable observations authorize an unbounded end.
+            let gameRunning = name.map { name in processes.contains { SessionWatcher.isGame($0, name: name) } } ?? false
+            let present = session.processes.contains(where: { inspector.isAlive($0) }) || !processes.isEmpty
+            return (present, gameRunning)
         }
     }
 
     private static func resolved(_ outcome: RestoreOutcome, session: LaunchSession) -> Bool {
-        guard session.hides.isEmpty else { return false }
+        guard session.hides.isEmpty, session.nativeProxy == nil else { return false }
         switch outcome {
         case .clean: return true
         case .conflict: return session.state == .recoveryConflict

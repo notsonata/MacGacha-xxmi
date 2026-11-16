@@ -31,6 +31,13 @@ extension AppModel {
                 preview.preDownloads[game.id] = overlay
             }
             model = preview
+        } else if name == "moving", let first = games.first {
+            // Copying to another drive: the move owns the operation slot, so the footer shows its phase and Cancel.
+            let copying = GameState(status: .installed(tag: "7.1.0"), activity: .working(.staging, fraction: 0.42, bytesPerSecond: nil))
+            model = preview(logLines: [], games: Dictionary(uniqueKeysWithValues: games.map {
+                ($0.id, $0.id == first.id ? copying : GameState(status: .installed(tag: "7.1.0")))
+            }), region: region)
+            model?.gameOperation = GameOperationToken(id: first.id, generation: UUID(), kind: .updating, isMoving: true)
         } else if let name, let state = debugGameState(name) {
             model = preview(logLines: [], games: Dictionary(uniqueKeysWithValues: games.map { ($0.id, state) }), region: region)
         } else if let name, name.hasPrefix("busy") {
@@ -55,6 +62,33 @@ extension AppModel {
             model = preview
         } else { model = debugLaunchPreview(state: name, recoveryNotice: notice, region: region) }
         if notice, let recovery = debugRecoveryNotice(in: region) { model?.recoveryNotices = [recovery] }
+        if let contents = defaults.string(forKey: "MacGachaDebugHUD").flatMap(MetalHUDContents.init(rawValue:)), let model {
+            // Inert in-memory HUD settings for screenshots of the settings sheet.
+            for game in GameDefinition.all {
+                var settings = model.launchSettings(for: game.id)
+                settings.metalHUD = true; settings.metalHUDContents = contents
+                settings.metalHUDElements = [.fps, .frameinterval, .frameintervalgraph, .gputime]
+                settings.metalHUDPosition = .bottomRight; settings.metalHUDSize = .large
+                model.launchSettingsCache[game.id] = settings
+            }
+        }
+        if defaults.bool(forKey: "MacGachaDebugStorage"), let model {
+            // Inert sample sizes for screenshots of the Storage panel; cleanup candidates come only from a real inventory.
+            let gb: Int64 = 1_000_000_000
+            model.storage = StorageSnapshot(editions: [
+                EditionStorage(id: "genshin", game: .available(98 * gb), prefixes: .available(gb * 12 / 10), preDownload: .available(84 * gb / 10)),
+                EditionStorage(id: "starrail", game: .available(71 * gb), prefixes: .available(gb * 9 / 10), preDownload: .available(0)),
+                EditionStorage(id: "zzz", game: .unavailable, prefixes: .available(gb * 11 / 10), preDownload: .available(0)),
+            ], runtimes: .available(46 * gb / 10), logs: .available(120_000_000), artCache: .available(310_000_000),
+                eventsCache: .available(2_000_000), candidates: [])
+        }
+        if defaults.bool(forKey: "MacGachaDebugPlayTime") {
+            // Inert sample totals for screenshots: 42 h in all, last session 1 h 20 min a day ago.
+            let json = #"{"totalSeconds":151320,"lastSessionSeconds":4800,"lastPlayed":\#(Date.now.timeIntervalSinceReferenceDate - 86_400)}"#
+            if let summary = try? JSONDecoder().decode(PlayTimeSummary.self, from: Data(json.utf8)) {
+                model?.playTimeSummaries = Dictionary(uniqueKeysWithValues: GameDefinition.all.map { ($0.id, summary) })
+            }
+        }
         return model
     }
 

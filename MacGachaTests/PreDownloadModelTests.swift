@@ -12,6 +12,74 @@ import GameLibrary
 @testable import MacGacha
 
 @Suite(.timeLimit(.minutes(1))) @MainActor struct PreDownloadModelTests {
+    @Test func resumeOfAlreadyReadyPredownloadDoesNotRepeatCompletion() async throws {
+        let center = TestGameNotificationCenter(), service = try PreDownloadModelServices()
+        defer { service.finish() }
+        let model = AppModel(paths: AppPaths(root: URL(fileURLWithPath: "/inert/notifications-ready")),
+            manifest: try RuntimeManifest(components: []), services: PreviewRuntimeServices(), defaults: nil,
+            gameServices: service, launchPreferences: PreDownloadModelPreferences(),
+            notifications: center, notificationIsFrontmost: { false })
+        service.setInfo(try info(.ready, downloaded: 100))
+        await model.refreshPreDownloads(in: .global)
+        model.resumePreDownload("genshin")
+        await service.waitForOpen()
+        let worker = try #require(model.gameTask)
+        service.emit(.phase(.completed)); service.finish()
+        await worker.value
+        await model.notificationTask?.value
+        #expect(center.delivered.isEmpty)
+    }
+
+    @Test(arguments: [true, false]) func notificationsRequireExplicitPredownloadCompletion(completed: Bool) async throws {
+        let center = TestGameNotificationCenter(), service = try PreDownloadModelServices()
+        let root = URL(fileURLWithPath: "/tmp/macgacha-notification-predownload-\(UUID())")
+        defer { service.finish(); try? FileManager.default.removeItem(at: root) }
+        let model = AppModel(paths: AppPaths(root: root), manifest: try RuntimeManifest(components: []),
+            services: PreviewRuntimeServices(), defaults: nil, gameServices: service,
+            launchPreferences: PreDownloadModelPreferences(), notifications: center, notificationIsFrontmost: { false })
+        model.setGameState("genshin", GameState(status: .installed(tag: "1.0")))
+        await model.refreshPreDownloads(in: .global)
+        await model.notificationTask?.value
+        #expect(center.delivered.map(\.kind) == [.preDownloadAvailable])
+        model.startPreDownload("genshin")
+        await service.waitForOpen()
+        let worker = try #require(model.gameTask)
+        service.setInfo(try info(.ready, downloaded: 100))
+        if completed { service.emit(.phase(.completed)) }
+        service.finish()
+        await worker.value
+        await model.notificationTask?.value
+        #expect(center.delivered.map(\.kind) == (completed ? [.preDownloadAvailable, .preDownloadFinished] : [.preDownloadAvailable]))
+        // Startup/cache refresh of already ready work must never replay completion.
+        await model.refreshPreDownloads(in: .global)
+        await model.notificationTask?.value
+        #expect(center.delivered.count == (completed ? 2 : 1))
+    }
+
+    @Test func movePausesAndDrainsPredownloadWithoutReleasingReservation() async throws {
+        let gate = PreDownloadModelGate()
+        let (model, service) = try fixture(drain: gate); defer { service.finish() }
+        await model.start()
+        model.startPreDownload("genshin")
+        await service.waitForOpen()
+        #expect(model.canMoveGame("genshin"))
+        model.moveGame("genshin", to: URL(fileURLWithPath: "/tmp/new-game-folder"))
+        let worker = try #require(model.gameTask)
+        await gate.waitForEntry()
+        #expect(model.gameOperation?.isMoving == true)
+        #expect(model.isBusyForUpdates)
+        #expect(model.languageRestartBlocker == .unresumableOperation("genshin"))
+        #expect(service.calls == ["start"])
+        await gate.release()
+        await service.waitForOpen()
+        #expect(service.calls == ["start", "move"])
+        #expect(model.gameOperation?.isMoving == true)
+        service.emit(.phase(.completed)); service.finish()
+        await worker.value
+        #expect(model.gameOperation == nil)
+        #expect(model.preDownloadState(for: "genshin").state == .paused)
+    }
+
     @Test func transferProgressAndReadyAreSeparateFromInstalledState() async throws {
         let (model, service) = try fixture(); defer { service.finish() }
         await model.start()
@@ -310,6 +378,7 @@ private final class PreDownloadModelServices: GameServices, Sendable {
     func resume(_ id: String, approved: Bool) async -> GameEventStream { await base.resume(id, approved: approved) }
     func verify(_ id: String, mode: Verifier.Mode) async -> GameEventStream { await base.verify(id, mode: mode) }
     func setVoices(_ id: String, _ voices: Set<String>) async -> GameEventStream { await base.setVoices(id, voices) }
+    func move(_ id: String, to folder: URL) async -> GameEventStream { await open("move") }
     func uninstall(_ id: String) async throws { try await base.uninstall(id) }
 }
 private struct PreDownloadModelPreferences: LaunchPreferencesPersistence {

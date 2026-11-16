@@ -13,17 +13,43 @@ enum GameUpdateCheckResult: Sendable, Equatable {
 struct GameOperationToken: Sendable, Equatable {
     let id: String; let generation: UUID
     var kind: OtherRegionActivity = .downloading
+    var notificationCompletion: GameNotificationKind? = nil
     var isVerification = false
     var isUninstall = false
     var isPreDownload = false
+    var isMoving = false
+    var moveDestination: URL? = nil
+    var installPath: URL? = nil
 }
 private enum GameRequest: Sendable {
-    case install(Set<String>, URL, Bool), adopt(URL, Set<String>), update, resume(Bool), verify, voices(Set<String>), uninstall
+    case install(Set<String>, URL, Bool), adopt(URL, Set<String>), update, resume(Bool), verify, voices(Set<String>), uninstall, move(URL)
+    var isMoving: Bool { if case .move = self { true } else { false } }
     var isUninstall: Bool { if case .uninstall = self { true } else { false } }
+    var installPath: URL? {
+        switch self {
+        case .install(_, let path, _), .adopt(let path, _): path
+        default: nil
+        }
+    }
+    func notificationCompletion(record: GameRecord?) -> GameNotificationKind? {
+        switch self {
+        case .install: .installFinished
+        case .update: .updateFinished
+        case .verify: .repairFinished
+        case .resume:
+            switch record?.pending?.kind {
+            case .install: .installFinished
+            case .update: .updateFinished
+            case .repair: .repairFinished
+            default: nil
+            }
+        default: nil
+        }
+    }
     func activity(record: GameRecord?) -> OtherRegionActivity {
         switch self {
         case .verify, .adopt: .verifying
-        case .update, .uninstall: .updating
+        case .update, .uninstall, .move: .updating
         case .resume: record?.pending?.kind == .update ? .updating : record?.pending?.kind == .repair ? .verifying : .downloading
         case .install, .voices: .downloading
         }
@@ -38,7 +64,11 @@ private struct GameSnapshot: Sendable {
     let record: GameRecord?
     var error: LauncherError? = nil
 }
-@concurrent private func readGame(_ services: any GameServices, id: String) async -> GameSnapshot {
+@concurrent private func readGame(_ services: any GameServices, id: String, draining: Bool = false) async -> GameSnapshot {
+    if draining {
+        do { try await services.waitUntilIdle(id) }
+        catch { return GameSnapshot(status: await services.status(id), record: try? await services.record(id), error: launcherError(error)) }
+    }
     let status = await services.status(id)
     do { return GameSnapshot(status: status, record: try await services.record(id)) }
     catch { return GameSnapshot(status: status, record: nil, error: launcherError(error)) }
@@ -68,6 +98,7 @@ private struct GameSnapshot: Sendable {
                     self.clearCheckingGameUpdate(id); return
                 }
                 self.applyGame(GameSnapshot(status: status, record: record), id: id, activity: nil)
+                if case .updateAvailable(_, let version) = status { self.notify(.updateAvailable, gameID: id, version: version) }
                 self.gameRevisions[id] = UUID() // Invalidate automatic reads begun during the check.
                 switch status {
                 case .installed: self.gameUpdateCheck[id] = .upToDate(self.eventsNow())
@@ -126,6 +157,7 @@ private struct GameSnapshot: Sendable {
         // so a cached automatic read cannot discard its fresh result.
         for (id, snapshot) in results where gameRevisions[id] == revisions[id] && gameUpdateCheckTasks[id] == nil {
             applyGame(snapshot, id: id, activity: games[id]?.activity)
+            if case .updateAvailable(_, let version) = snapshot.status { notify(.updateAvailable, gameID: id, version: version) }
         }
         await refreshPreDownloads(in: region)
         // Records are local; only the selected region performs remote status reads.
@@ -168,6 +200,47 @@ private struct GameSnapshot: Sendable {
         guard case .needsApproval = games[id]?.activity else { return }
         beginGame(id, .resume(true)) // Resume the exact saved plan; never rebuild it.
     }
+    func canMoveGame(_ id: String) -> Bool {
+        guard GameDefinition.find(id) != nil, !isStarting, !gameMoveRecoveryReservation, languageRestart == nil, !updater.isInstallingUpdate,
+            launchStartupError == nil, runtimeCatalogMutationID == nil,
+            gameRecords[id]?.installed != nil, gameRecords[id]?.pending == nil,
+            gameRecords[id]?.uninstalling == false, launchSlotOwner != id, launchTasks[id] == nil,
+            !liveLaunchGames.contains(id), !launchRecoveryConflicts.contains(id),
+            !recoveryNotices.contains(where: { $0.game == id }),
+            gameOperation == nil || (gameOperation?.id == id && gameOperation?.isPreDownload == true && gameOperation?.isUninstall == false) else { return false }
+        switch launchStates[id] {
+        case .starting, .running, .ready, .recoveryNeeded: return false
+        case nil, .failed: break
+        }
+        switch games[id]?.status {
+        case .installed, .updateAvailable: return true
+        default: return false
+        }
+    }
+
+    func moveGame(_ id: String, to folder: URL) {
+        guard canMoveGame(id) else { return }
+        if let game = GameDefinition.find(id),
+            Self.moveOverlapsModLibrary(source: gameRecords[id]?.installPath,
+                destination: folder.appendingPathComponent(game.defaultInstallDirectoryName, isDirectory: true),
+                libraries: modSupportSnapshots.values.compactMap(\.modsDirectory)) {
+            show(message: String(localized: "A mod library is in that location. Choose a folder outside your mod libraries, or move the mod library first."))
+            return
+        }
+        beginGame(id, .move(folder))
+    }
+
+    /// GameLibrary does not know about relocated XXMI libraries. A game must not
+    /// be moved into or around one, and a library must not travel inside a game.
+    nonisolated static func moveOverlapsModLibrary(source: URL?, destination: URL, libraries: [URL]) -> Bool {
+        func path(_ url: URL) -> String { url.resolvingSymlinksInPath().standardizedFileURL.path }
+        func contains(_ parent: String, _ child: String) -> Bool { child == parent || child.hasPrefix(parent + "/") }
+        let target = path(destination), from = source.map(path)
+        return libraries.map(path).contains { library in
+            contains(library, target) || contains(target, library) || from.map { contains($0, library) } == true
+        }
+    }
+
     func uninstallGame(_ id: String) async { await beginGame(id, .uninstall)?.value }
     func installedVoices(_ id: String) -> Set<String> { gameRecords[id]?.installed?.voices ?? [] }
     func gameRecord(_ id: String) -> GameRecord? { gameRecords[id] }
@@ -186,63 +259,6 @@ private struct GameSnapshot: Sendable {
         }
     }
 
-    /// Mounting, unmounting or renaming a volume can change whether a game's
-    /// install folder is reachable. The throttled status refresh would keep a
-    /// stale "Location Unavailable" until restart, so re-read only the games a
-    /// volume change can affect: those already unavailable and those on
-    /// another volume. Internal-disk games are never re-read here.
-    func observeVolumeChanges() {
-        let center = volumeCenter
-        let names = [NSWorkspace.didMountNotification, NSWorkspace.didUnmountNotification, NSWorkspace.didRenameVolumeNotification]
-        gameVolumeTask = Task { [weak self] in
-            await withDiscardingTaskGroup { group in
-                for name in names {
-                    group.addTask { [weak self] in
-                        let events = center.notifications(named: name).map { _ in true }
-                        for await _ in events {
-                            guard !Task.isCancelled else { return }
-                            await self?.refreshGameLocations()
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    func refreshGameLocations() async {
-        // Before startup, the first status read already observes the volume.
-        guard gameStartupTask != nil else { return }
-        // Coalesce the burst of notifications one mount produces.
-        guard !gameLocationRefreshInFlight else { gameLocationRefreshPending = true; return }
-        gameLocationRefreshInFlight = true
-        defer { gameLocationRefreshInFlight = false }
-        repeat {
-            gameLocationRefreshPending = false
-            await ensureGameStartup().value
-            guard !Task.isCancelled, launchStartupError == nil else { return }
-            let revisions = gameRevisions, services = gameServices, region = region
-            let ids = GameDefinition.inRegion(region).map(\.id).filter { id in
-                guard id != gameOperation?.id, gameUpdateCheckTasks[id] == nil else { return false }
-                if case .locationUnavailable = games[id]?.status { return true }
-                return gameRecords[id]?.installPath.standardizedFileURL.path(percentEncoded: false).hasPrefix("/Volumes/") == true
-            }
-            guard !ids.isEmpty else { continue }
-            let results = await withTaskGroup(of: (String, GameSnapshot).self) { group in
-                for id in ids { group.addTask { (id, await readGame(services, id: id)) } }
-                var result: [(String, GameSnapshot)] = []
-                for await value in group { result.append(value) }
-                return result
-            }
-            guard !Task.isCancelled else { return }
-            var changed = false
-            for (id, snapshot) in results where gameRevisions[id] == revisions[id] && gameUpdateCheckTasks[id] == nil && id != gameOperation?.id {
-                if games[id]?.status != snapshot.status { changed = true }
-                applyGame(snapshot, id: id, activity: games[id]?.activity, reportError: false)
-            }
-            if changed { await refreshPreDownloads(in: region) }
-        } while gameLocationRefreshPending
-    }
-
     func ensureGameStartup() -> Task<Void, Never> {
         if let task = gameStartupTask { return task }
         let services = gameServices
@@ -255,11 +271,11 @@ private struct GameSnapshot: Sendable {
         return task
     }
 
-    private func reserveGame(_ id: String, activity: GameActivity, kind: OtherRegionActivity, isVerification: Bool, isUninstall: Bool) -> GameOperationToken? {
+    private func reserveGame(_ id: String, activity: GameActivity, kind: OtherRegionActivity, isVerification: Bool, isUninstall: Bool, installPath: URL?, isMoving: Bool = false, moveDestination: URL? = nil, notificationCompletion: GameNotificationKind? = nil) -> GameOperationToken? {
         guard canBeginGameOrRuntimeOperation() else { return nil }
         guard GameDefinition.all.contains(where: { $0.id == id }) else { show(LauncherError.io("Unknown game")); return nil }
-        guard gameOperation == nil else { show(LauncherError.busy("another game operation is running")); return nil }
-        let token = GameOperationToken(id: id, generation: UUID(), kind: kind, isVerification: isVerification, isUninstall: isUninstall)
+        guard gameOperation == nil || (isMoving && gameOperation?.id == id && gameOperation?.isPreDownload == true && gameOperation?.isUninstall == false) else { show(LauncherError.busy("another game operation is running")); return nil }
+        let token = GameOperationToken(id: id, generation: UUID(), kind: kind, notificationCompletion: notificationCompletion, isVerification: isVerification, isUninstall: isUninstall, isMoving: isMoving, moveDestination: moveDestination, installPath: installPath)
         gameOperation = token; gameRevisions[id] = token.generation
         gameProgress = GameProgress()
         dismissError()
@@ -268,17 +284,35 @@ private struct GameSnapshot: Sendable {
     }
 
     @discardableResult private func beginGame(_ id: String, _ request: GameRequest) -> Task<Void, Never>? {
+        let previousPreDownload = request.isMoving && gameOperation?.id == id && gameOperation?.isPreDownload == true ? gameTask : nil
+        let destination: URL? = if case .move(let folder) = request { folder } else { nil }
         guard let token = reserveGame(id, activity: request.isUninstall ? .working(.deleting, fraction: nil, bytesPerSecond: nil) : .resolving,
-            kind: request.activity(record: gameRecords[id]), isVerification: { if case .verify = request { true } else { false } }(), isUninstall: request.isUninstall) else { return nil }
+            kind: request.activity(record: gameRecords[id]), isVerification: { if case .verify = request { true } else { false } }(), isUninstall: request.isUninstall, installPath: request.installPath ?? gameRecords[id]?.installPath, isMoving: request.isMoving, moveDestination: destination, notificationCompletion: request.notificationCompletion(record: gameRecords[id])) else { return nil }
+        previousPreDownload?.cancel()
         let services = gameServices, startup = ensureGameStartup()
         let task = Task { [weak self] in
             var approval: (required: Int64, available: Int64)?
             var failure: LauncherError?
             var completed = false
+            var notificationCompletion = token.notificationCompletion
             do {
+                if let previousPreDownload {
+                    await previousPreDownload.value
+                    try await services.waitForPreDownloadDrain(id)
+                }
                 await startup.value
                 try Task.checkCancellation()
                 if let error = self?.launchStartupError { throw error }
+                if case .resume = request {
+                    // A cached pending record can outlive its completed durable plan.
+                    let current = try? await services.record(id)
+                    notificationCompletion = request.notificationCompletion(record: current)
+                }
+                switch request {
+                case .update, .resume, .verify, .voices, .uninstall, .move: try await self?.recheckGameLocation(id)
+                case .install, .adopt: break
+                }
+                self?.gameLocationPauseReasons[id] = nil
                 let stream = await gameStream(services, id: id, request: request)
                 events: for try await event in stream {
                     try Task.checkCancellation()
@@ -309,18 +343,53 @@ private struct GameSnapshot: Sendable {
                 else { failure = error }
             }
             guard self?.gameOperation == token else { return }
+            // Retire older location reads before capture, preserving later events.
+            let finalizationRevision = UUID()
+            self?.gameRevisions[id] = finalizationRevision
+            var snapshotRevision: UUID? = finalizationRevision
             // Cancellation may have raced with publication. Read the durable state
             // in an uncancelled task, retaining services rather than the model.
-            let snapshot = await Task.detached { await readGame(services, id: id) }.value
+            let ejectPause = failure == .installVolumeUnavailable || self?.gameLocationPauseReasons[id] == .installVolumeUnavailable
+            // Moves and eject pauses retain the reservation through drainage.
+            let initialDrain = ejectPause || token.isMoving
+            var drained = initialDrain
+            var snapshot = await Task.detached { await readGame(services, id: id, draining: initialDrain) }.value
             guard let self, self.gameOperation == token else { return }
-            if let failure { self.show(failure) }
+            let cacheInfo = try? await services.preDownloadInfo(id, refresh: false)
+            guard self.gameOperation == token else { return }
+            // Recheck after every read: a mount may finish its refresh already,
+            // or queue behind this consumer. Late ejects still require drainage.
+            while self.gameRevisions[id] != snapshotRevision ||
+                (!drained && self.gameLocationPauseReasons[id] == .installVolumeUnavailable) {
+                let needsDrain = !drained && self.gameLocationPauseReasons[id] == .installVolumeUnavailable
+                snapshotRevision = self.gameRevisions[id]
+                snapshot = await Task.detached { await readGame(services, id: id, draining: needsDrain) }.value
+                drained = drained || needsDrain
+                guard self.gameOperation == token else { return }
+            }
+            let moveStoppedByEject = token.isMoving && ejectPause && !completed
+            if token.isMoving {
+                // A move rolls back rather than publishing a resumable plan.
+                // Its transient eject marker must not become a download hint.
+                self.gameLocationPauseReasons[id] = nil
+                if moveStoppedByEject {
+                    self.showMoveVolumeUnavailable(originalFolder: snapshot.record?.installPath == token.installPath)
+                } else if let failure { self.show(failure) }
+            } else {
+                if failure == .installVolumeUnavailable { self.gameLocationPauseReasons[id] = .installVolumeUnavailable }
+                if let reason = self.gameLocationPauseReasons[id], !completed { self.show(reason) }
+                else if let failure { self.show(failure) }
+            }
             let activity: GameActivity?
             if !completed, failure == nil, let approval { activity = .needsApproval(required: approval.required, available: approval.available) }
             else { activity = nil }
-            self.applyGame(snapshot, id: id, activity: activity, reportError: failure == nil)
-            if let info = try? await services.preDownloadInfo(id, refresh: false), self.gameOperation == token {
+            // Publish for the latest observed revision without replacing it.
+            // No suspension may separate this publication from releasing the token.
+            let finalRevision = snapshotRevision
+            self.applyGame(snapshot, id: id, activity: activity, reportError: failure == nil && !moveStoppedByEject)
+            if let cacheInfo {
                 self.preDownloadRevisions[id] = UUID()
-                self.preDownloads[id] = PreDownloadOverlay(info: info)
+                self.preDownloads[id] = PreDownloadOverlay(info: cacheInfo)
             }
             if case .insufficientSpace(let required, let available) = failure, case .paused = snapshot.status {
                 var state = self.games[id] ?? GameState(status: snapshot.status)
@@ -334,13 +403,19 @@ private struct GameSnapshot: Sendable {
             let failed = failure.map { $0 != .cancelled } ?? false
             self.lastGameConsumerOutcome = (token, failed || snapshot.error != nil ? .failed : completed ? .completed : .stopped)
             self.releaseGame(token, activity: activity)
+            if let completion = notificationCompletion {
+                if completed { self.notify(completion, gameID: id) }
+                else if approval != nil { self.notify(.pausedForSpace, gameID: id) }
+                else if case .insufficientSpace = failure { self.notify(.pausedForSpace, gameID: id) }
+                else if failed { self.notify(.operationFailed, gameID: id) }
+            }
             // CacheDelete is advisory and potentially slow. Query only this pause,
             // after releasing the operation slot, never from the progress stream.
             if let shortage = self.games[id]?.spaceShortage, shortage.isMeasured,
                 let location = snapshot.record?.installPath {
                 let probe = self.purgeableSpace
                 let important = try? await BlockingIO.run { probe.importantUsageBytes(at: location) }
-                guard self.gameRevisions[id] == token.generation,
+                guard self.gameRevisions[id] == finalRevision,
                     var state = self.games[id], state.activity == activity, state.spaceShortage == shortage else { return }
                 state.spaceShortage?.purgeable = important.map { max(0, max(0, $0) - max(0, shortage.available)) }
                 self.setGameState(id, state)
@@ -422,6 +497,7 @@ private func gameStream(_ services: any GameServices, id: String, request: GameR
     case .resume(let approved): return await services.resume(id, approved: approved)
     case .verify: return await services.verify(id, mode: .full)
     case .voices(let voices): return await services.setVoices(id, voices)
+    case .move(let folder): return await services.move(id, to: folder)
     case .uninstall:
         do { try await services.uninstall(id); return GameEventStream { $0.yield(.phase(.completed)); $0.finish() } }
         catch { return GameEventStream { $0.finish(throwing: error) } }

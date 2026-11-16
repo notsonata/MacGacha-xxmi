@@ -743,8 +743,8 @@ public struct ContainedFileSystem: Sendable, Hashable {
     /// hard links with names outside this tree are refused by default. Owned runtime
     /// mirrors may explicitly allow them; untrusted archive/import callers must not.
     /// Bounded like other tree operations.
-    package func inspectTree(at path: SafeRelativePath, allowingExternalHardLinks: Bool = false) throws -> [TreeEntry] {
-        guard let fd = try directory(path.components, create: false) else { throw LauncherError.io("Directory is missing") }
+    package func inspectTree(at path: SafeRelativePath? = nil, allowingExternalHardLinks: Bool = false) throws -> [TreeEntry] {
+        guard let fd = try directory(path?.components ?? [], create: false) else { throw LauncherError.io("Directory is missing") }
         defer { close(fd) }
         var budget = Self.entryLimit
         var result: [TreeEntry] = []
@@ -770,7 +770,7 @@ public struct ContainedFileSystem: Sendable, Hashable {
             result.append(TreeEntry(path: relative, type: type == S_IFDIR ? .directory : type == S_IFREG ? .regularFile : .other,
                 linkTarget: target, size: uniqueSize))
         }
-        guard allowingExternalHardLinks || hardlinks.values.allSatisfy({ $0.count == $0.expected }) else { throw LauncherError.unsafePath(path.description) }
+        guard allowingExternalHardLinks || hardlinks.values.allSatisfy({ $0.count == $0.expected }) else { throw LauncherError.unsafePath(path?.description ?? "tree") }
         return result
     }
 
@@ -1377,6 +1377,109 @@ private final class RootDescriptor: Sendable {
 }
 
 extension ContainedFileSystem {
+    /// Physical allocation, including directory entries, counting a hard-linked
+    /// inode once per walk. Links are counted themselves and never traversed.
+    /// Call on BlockingIO. Bounds fail rather than publishing a partial total.
+    public func allocatedBytes(at path: SafeRelativePath? = nil,
+        excluding: Set<SafeRelativePath> = [], maximumEntries: Int = 1_000_000,
+        maximumDepth: Int = 128) throws -> Int64 {
+        try storageAllocatedBytes(at: [path], excluding: excluding, reclaiming: false,
+            maximumEntries: maximumEntries, maximumDepth: maximumDepth)
+    }
+
+    /// Combined allocation for disjoint roots, sharing one inode map and budget.
+    public func allocatedBytes(at paths: [SafeRelativePath], maximumEntries: Int = 1_000_000,
+        maximumDepth: Int = 128) throws -> Int64 {
+        try Task.checkCancellation()
+        guard paths.count <= maximumEntries else { throw LauncherError.io("Storage root limit exceeded") }
+        return try storageAllocatedBytes(at: Set(paths).map(Optional.some), excluding: [], reclaiming: false,
+            maximumEntries: maximumEntries, maximumDepth: maximumDepth)
+    }
+
+    /// A cleanup estimate excludes inodes with links retained outside these
+    /// targets. One shared walk budget and inode map span every deletion root.
+    public func reclaimableAllocatedBytes(at paths: [SafeRelativePath], maximumEntries: Int = 1_000_000,
+        maximumDepth: Int = 128) throws -> Int64 {
+        try Task.checkCancellation()
+        guard paths.count <= maximumEntries else { throw LauncherError.io("Storage root limit exceeded") }
+        var roots: [SafeRelativePath] = []
+        for path in Set(paths).sorted(by: { $0.components.lexicographicallyPrecedes($1.components) }) {
+            try Task.checkCancellation()
+            if let previous = roots.last, path.components.starts(with: previous.components) { continue }
+            roots.append(path)
+        }
+        return try storageAllocatedBytes(at: roots.map(Optional.some), excluding: [], reclaiming: true,
+            maximumEntries: maximumEntries, maximumDepth: maximumDepth)
+    }
+
+    private func storageAllocatedBytes(at paths: [SafeRelativePath?], excluding: Set<SafeRelativePath>,
+        reclaiming: Bool, maximumEntries: Int, maximumDepth: Int) throws -> Int64 {
+        guard maximumEntries > 0, maximumDepth >= 0 else { throw LauncherError.io("Invalid storage scan bounds") }
+        struct Inode: Hashable { let device: Int32; let inode: UInt64 }
+        var seen: Set<Inode> = [], budget = maximumEntries, total: Int64 = 0
+        struct LinkedAllocation { let info: stat; var references: UInt64 }
+        var linked: [Inode: LinkedAllocation] = [:]
+        func add(_ info: stat) throws {
+            let key = Inode(device: info.st_dev, inode: info.st_ino)
+            if reclaiming, info.st_mode & S_IFMT != S_IFDIR {
+                if var previous = linked[key] { previous.references += 1; linked[key] = previous }
+                else { linked[key] = LinkedAllocation(info: info, references: 1) }
+                return
+            }
+            guard seen.insert(key).inserted else { return }
+            let (bytes, overflow) = Int64(info.st_blocks).multipliedReportingOverflow(by: 512)
+            let (sum, sumOverflow) = total.addingReportingOverflow(bytes)
+            guard bytes >= 0, !overflow, !sumOverflow else { throw LauncherError.io("Storage size overflow") }
+            total = sum
+        }
+        func walk(_ fd: Int32, components: [String], depth: Int) throws {
+            try Task.checkCancellation()
+            guard depth <= maximumDepth else { throw LauncherError.io("Storage depth limit exceeded") }
+            var info = stat()
+            guard fstat(fd, &info) == 0 else { throw LauncherError.io("Cannot inspect storage directory") }
+            try add(info)
+            for name in try names(in: fd, budget: &budget) {
+                try Task.checkCancellation()
+                let childComponents = components + [name]
+                if excluding.contains(try SafeRelativePath(childComponents.joined(separator: "/"))) { continue }
+                guard let child = try entry(name, parent: fd) else { continue }
+                if child.st_mode & S_IFMT == S_IFDIR {
+                    let next = openat(fd, name, Self.directoryFlags)
+                    guard next >= 0 else { throw LauncherError.io("Storage directory changed") }
+                    defer { close(next) }
+                    var opened = stat()
+                    guard fstat(next, &opened) == 0, opened.st_dev == child.st_dev, opened.st_ino == child.st_ino else {
+                        throw LauncherError.io("Storage directory changed")
+                    }
+                    try walk(next, components: childComponents, depth: depth + 1)
+                } else { try add(child) }
+            }
+        }
+        try Task.checkCancellation()
+        for path in paths {
+            if let path {
+            guard !excluding.contains(path), let parent = try directory(Array(path.components.dropLast()), create: false) else { continue }
+            defer { close(parent) }
+            guard let info = try entry(path.components.last!, parent: parent) else { continue }
+            if info.st_mode & S_IFMT != S_IFDIR { try add(info); continue }
+            guard let pinned = try pinDirectoryIfPresent(at: path) else { continue }
+            try pinned.withRootDirectoryDescriptor { try walk($0, components: path.components, depth: 0) }
+        } else if let fd = try directory([], create: false) {
+            defer { close(fd) }
+            try walk(fd, components: [], depth: 0)
+        }
+        }
+        for allocation in linked.values where allocation.references >= UInt64(allocation.info.st_nlink) {
+            let (bytes, overflow) = Int64(allocation.info.st_blocks).multipliedReportingOverflow(by: 512)
+            let (sum, sumOverflow) = total.addingReportingOverflow(bytes)
+            guard bytes >= 0, !overflow, !sumOverflow else { throw LauncherError.io("Storage size overflow") }
+            total = sum
+        }
+        return total
+    }
+}
+
+extension ContainedFileSystem {
     /// Birth time also excludes reuse of a formerly owned inode after its unlink.
     package struct OwnedFileIdentity: Codable, Equatable, Sendable {
         package let device: Int64, inode: UInt64, birthSeconds: Int64, birthNanos: Int64
@@ -1436,6 +1539,11 @@ extension ContainedFileSystem {
             var info = stat()
             guard fstat(fd, &info) == 0, identity.matches(info) else { throw LauncherError.io("Owned file identity changed") }
             return info.st_size
+        }
+        package func modificationDate() throws -> Date {
+            var info = stat()
+            guard fstat(fd, &info) == 0, identity.matches(info) else { throw LauncherError.io("Owned file identity changed") }
+            return Date(timeIntervalSince1970: Double(info.st_mtimespec.tv_sec) + Double(info.st_mtimespec.tv_nsec) / 1e9)
         }
         @discardableResult package func append(_ data: Data) throws -> Int64 {
             let count = try data.withUnsafeBytes { try fs.fileOps.write(fd, bytes: $0) }
@@ -1551,5 +1659,103 @@ extension ContainedFileSystem {
         try removeFile(at: note)
         try removeEmptyDirectory(at: folder)
         return true
+    }
+}
+
+// Move primitives keep descriptor ownership and non-replacing publication together.
+extension ContainedFileSystem {
+    package func moveDirectory(at source: SafeRelativePath, to destination: SafeRelativePath,
+        in targetFS: Self, matching identity: FileSystemIdentity) throws {
+        guard let parent = try directory(Array(source.components.dropLast()), create: false),
+            let target = try targetFS.directory(Array(destination.components.dropLast()), create: false) else {
+            throw LauncherError.io("Move parent is missing")
+        }
+        defer { close(parent); close(target) }
+        guard let child = try pinDirectoryIfPresent(at: source), try child.rootIdentity() == identity,
+            try targetFS.entry(destination.components.last!, parent: target) == nil else {
+            throw LauncherError.io("Move folder changed or destination exists")
+        }
+        try fileOps.rename(from: source.components.last!, in: parent,
+            to: destination.components.last!, in: target, exclusive: true)
+        try synchronize(parent)
+        try targetFS.synchronize(target)
+    }
+
+    package func createExclusiveDirectory(at path: SafeRelativePath) throws -> Self {
+        guard let parent = try directory(Array(path.components.dropLast()), create: false) else {
+            throw LauncherError.io("Move parent is missing")
+        }
+        defer { close(parent) }
+        guard mkdirat(parent, path.components.last!, 0o700) == 0 else {
+            throw LauncherError.fileSystemFailure("Cannot create move staging")
+        }
+        try synchronize(parent)
+        guard let child = try pinDirectoryIfPresent(at: path) else { throw LauncherError.io("Move staging is missing") }
+        return child
+    }
+
+    /// copyfile metadata includes permissions, times, ACLs and extended attributes.
+    /// File data uses the bounded cancellable copy loop, preferring a clone.
+    package func copyMoveFile(at path: SafeRelativePath, to target: Self) throws {
+        let size = try self.size(at: path)
+        guard let size else { throw LauncherError.io("Move source disappeared") }
+        _ = try copyRegularFile(at: path, to: path, in: target, maxBytes: size, preferClone: true)
+        // A clone or data copy may already have retained read-only mode bits.
+        // Make only this independent output writable until copyfile restores
+        // the source attributes using the still-open output descriptor.
+        try target.withRegularDescriptor(at: path, writing: false, create: false) { descriptor, _, _ in
+            guard fchmod(descriptor, 0o600) == 0 else { throw LauncherError.fileSystemFailure("Cannot prepare move attributes") }
+        }
+        let input = try openForReading(at: path), output = try target.openForWriting(at: path, truncate: false)
+        defer { try? input.close(); try? output.close() }
+        guard fcopyfile(input.fileDescriptor, output.fileDescriptor, nil,
+            copyfile_flags_t(COPYFILE_STAT | COPYFILE_XATTR | COPYFILE_ACL)) == 0 else {
+            throw LauncherError.fileSystemFailure("Cannot preserve move attributes")
+        }
+        try target.fileOps.synchronize(output.fileDescriptor, durable: true)
+    }
+
+    package func copyMoveDirectoryAttributes(to target: Self, at path: SafeRelativePath? = nil) throws {
+        guard let input = try directory(path?.components ?? [], create: false),
+            let output = try target.directory(path?.components ?? [], create: false) else {
+            throw LauncherError.io("Move directory disappeared")
+        }
+        defer { close(input); close(output) }
+        guard fcopyfile(input, output, nil, copyfile_flags_t(COPYFILE_STAT | COPYFILE_XATTR | COPYFILE_ACL)) == 0 else {
+            throw LauncherError.fileSystemFailure("Cannot preserve directory attributes")
+        }
+        try target.synchronize(output)
+    }
+}
+
+extension ContainedFileSystem {
+    /// Only the identity-verified, discarded side of a move may have its directory
+    /// permissions relaxed. The authoritative source/destination is never changed.
+    package func removeMoveRoot(checkAvailability: () throws -> Void) throws {
+        func empty(_ descriptor: Int32, depth: Int, budget: inout Int) throws {
+            try checkAvailability()
+            guard depth <= 128 else { throw LauncherError.io("Removal depth exceeds limit") }
+            var info = stat()
+            guard fstat(descriptor, &info) == 0, fchmod(descriptor, info.st_mode & 0o7777 | 0o700) == 0 else {
+                throw LauncherError.fileSystemFailure("Cannot prepare discarded move directory")
+            }
+            for name in try names(in: descriptor, budget: &budget) {
+                try checkAvailability()
+                guard let childInfo = try entry(name, parent: descriptor) else { continue }
+                if childInfo.st_mode & S_IFMT == S_IFDIR {
+                    let child = openat(descriptor, name, Self.directoryFlags)
+                    guard child >= 0 else { throw accessError("move cleanup") }
+                    defer { close(child) }
+                    try empty(child, depth: depth + 1, budget: &budget)
+                    try fileOps.unlink(name, in: descriptor, isDirectory: true)
+                } else { try fileOps.unlink(name, in: descriptor, isDirectory: false) }
+            }
+            try synchronize(descriptor)
+        }
+        guard pinnedRoot != nil else { throw LauncherError.io("Move root is not pinned") }
+        var budget = Self.entryLimit
+        try withRootDirectoryDescriptor { try empty($0, depth: 0, budget: &budget) }
+        try checkAvailability()
+        try removePinnedRoot(onlyIfEmpty: true)
     }
 }

@@ -11,10 +11,544 @@ import DownloadEngine
 import RuntimeManager
 import GameLibrary
 import Sophon
+import Launch
 @testable import MacGacha
 
 @Suite(.serialized) @MainActor
 struct AppModelGamesTests {
+    @Test(.timeLimit(.minutes(1)), arguments: [PendingOperation.Kind.install, .update, .repair])
+    func resumedActivePlanNotifiesItsActualKind(kind: PendingOperation.Kind) async throws {
+        let center = TestGameNotificationCenter(), fake = FakeGameServices()
+        defer { fake.finish() }
+        let (model, _, _) = try gameFixture(fake: fake, notifications: center)
+        fake.setStatus(.paused(kind), for: "genshin")
+        var record = try #require(try await fake.record("genshin"))
+        record.pending = PendingOperation(kind: kind, planID: try SafeIdentifier("active-plan"),
+            planDigest: try Digest(algorithm: .sha256, hex: String(repeating: "a", count: 64)),
+            target: try #require(record.installed))
+        fake.setRecord(record, for: "genshin"); model.setGameRecord("genshin", record)
+        model.resumeGame("genshin")
+        let worker = try #require(model.gameTask)
+        var opened = fake.opened.stream.makeAsyncIterator(); _ = await opened.next()
+        fake.emit(.phase(.completed)); fake.finish()
+        await worker.value; await model.notificationTask?.value
+        let expected: GameNotificationKind = switch kind {
+        case .install: .installFinished
+        case .update: .updateFinished
+        default: .repairFinished
+        }
+        #expect(center.delivered.map(\.kind) == [expected])
+    }
+
+    @Test(.timeLimit(.minutes(1)), arguments: [false, true])
+    func finishedDurableResumeDoesNotNotifyFromStalePendingRecord(fails: Bool) async throws {
+        let center = TestGameNotificationCenter(), fake = FakeGameServices()
+        defer { fake.finish() }
+        let (model, _, _) = try gameFixture(fake: fake, notifications: center)
+        fake.setStatus(.installed(tag: "2.0"), for: "genshin")
+        var stale = try #require(try await fake.record("genshin"))
+        stale.pending = PendingOperation(kind: .update, planID: try SafeIdentifier("already-finished"),
+            planDigest: try Digest(algorithm: .sha256, hex: String(repeating: "a", count: 64)),
+            target: try #require(stale.installed))
+        model.setGameRecord("genshin", stale)
+        model.resumeGame("genshin")
+        let worker = try #require(model.gameTask)
+        var opened = fake.opened.stream.makeAsyncIterator(); _ = await opened.next()
+        if fails { fake.fail(.io("No pending operation")) }
+        else { fake.emit(.phase(.completed)); fake.finish() }
+        await worker.value
+        await model.notificationTask?.value
+        #expect(center.delivered.isEmpty)
+    }
+
+    @Test(.timeLimit(.minutes(1)), arguments: ["install", "update", "repair", "failure", "space", "cancel", "resumeFinished", "adopt"])
+    func notificationsFollowExplicitOperationOutcomes(action: String) async throws {
+        let center = TestGameNotificationCenter(), fake = FakeGameServices()
+        defer { fake.finish() }
+        let (model, _, _) = try gameFixture(fake: fake, notifications: center)
+        fake.setStatus(.installed(tag: "1.0"), for: "genshin")
+        switch action {
+        case "install": model.installGame("genshin", voices: [], at: gameLocation, approved: true)
+        case "repair": model.verifyGame("genshin")
+        case "resumeFinished": model.resumeGame("genshin")
+        case "adopt": model.adoptGame("genshin", folder: gameLocation, voices: [])
+        default: model.updateGame("genshin")
+        }
+        let worker = try #require(model.gameTask)
+        var opened = fake.opened.stream.makeAsyncIterator(); _ = await opened.next()
+        switch action {
+        case "failure": fake.fail(.io("Private /sensitive/path"))
+        case "space": fake.emit(.needsBatchApproval(required: 200, available: 10)); fake.finish()
+        case "cancel": model.pauseGame("genshin")
+        case "resumeFinished": fake.setStatus(.installed(tag: "2.0"), for: "genshin"); fake.finish()
+        default: fake.emit(.phase(.completed)); fake.finish()
+        }
+        await worker.value
+        await model.notificationTask?.value
+        let expected: GameNotificationKind? = switch action {
+        case "install": .installFinished
+        case "update": .updateFinished
+        case "repair": .repairFinished
+        case "failure": .operationFailed
+        case "space": .pausedForSpace
+        default: nil
+        }
+        #expect(center.delivered.map(\.kind) == (expected.map { [$0] } ?? []))
+    }
+
+    @Test(.timeLimit(.minutes(1))) func refreshNotifiesAvailabilityOnceWithoutReplayingCompletions() async throws {
+        let root = URL(fileURLWithPath: "/tmp/macgacha-notification-refresh-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let center = TestGameNotificationCenter(), fake = FakeGameServices()
+        fake.setStatus(.updateAvailable(from: "1.0", to: "2.0"), for: "genshin")
+        let model = AppModel(paths: AppPaths(root: root), manifest: try RuntimeManifest(components: []),
+            services: PreviewRuntimeServices(), defaults: nil, gameServices: fake,
+            notifications: center, notificationIsFrontmost: { false })
+        await model.refreshGames()
+        await model.notificationTask?.value
+        #expect(center.delivered.map(\.kind) == [.updateAvailable])
+        model.gameLastRefresh = [:]
+        await model.refreshGames()
+        await model.notificationTask?.value
+        #expect(center.delivered.count == 1)
+    }
+
+    @Test(.timeLimit(.minutes(1)), arguments: ["snapshot", "cacheInfo"], [false, true])
+    func remountDuringEjectFinalizationRestoresAvailableState(read: String, notifiedEject: Bool) async throws {
+        let gate = GameReadGate(), source = TestVolumeEventSource(), fake = FakeGameServices()
+        defer { gate.release(); fake.finish() }
+        let (model, _, _) = try gameFixture(fake: fake, volumeEvents: source)
+        let path = URL(fileURLWithPath: "/Volumes/Games SSD/Game")
+        let volume = URL(fileURLWithPath: "/Volumes/Games SSD")
+        fake.setLocation(path, for: "genshin")
+        fake.setStatus(.installed(tag: "1.0"), for: "genshin")
+        model.setGameRecord("genshin", try await fake.record("genshin"))
+        model.updateGame("genshin")
+        let operation = try #require(model.gameTask)
+        var opened = fake.opened.stream.makeAsyncIterator(); _ = await opened.next()
+        if read == "snapshot" { fake.gateNextRecordRead(gate) }
+        else { fake.gateNextCacheInfoRead(gate) }
+        fake.setStatus(.locationUnavailable(path), for: "genshin")
+        if notifiedEject { source.send(.unmounted(volume)) }
+        else { fake.fail(.installVolumeUnavailable) }
+        await gate.waitUntilEntered()
+        fake.setStatus(.paused(.update), for: "genshin")
+        source.send(.mounted(volume))
+        if !notifiedEject {
+            // This refresh completes before the consumer. A preserved revision
+            // alone cannot prevent the older final snapshot from overwriting it.
+            await model.volumeEventTask?.value
+            #expect(model.games["genshin"]?.status == .paused(.update))
+        }
+        gate.release()
+        await operation.value; await model.volumeEventTask?.value
+        #expect(model.games["genshin"]?.status == .paused(.update))
+        #expect(model.gameLocationURL(for: "genshin") == path)
+        #expect(model.unavailableVolumeName(for: "genshin") == nil)
+        #expect(model.gameLocationPauseReason(for: "genshin") == .installVolumeUnavailable)
+        #expect(fake.calls.count == 1)
+    }
+
+    @Test(.timeLimit(.minutes(1)), arguments: ["snapshot", "cacheInfo"])
+    func lateEjectDuringFinalizationRetainsReservationUntilDrain(read: String) async throws {
+        let milestones = AsyncStream<Bool>.makeStream()
+        let snapshot = GameReadGate()
+        let drain = GameReadGate(onEntry: { milestones.continuation.yield(true) })
+        let source = TestVolumeEventSource(), fake = FakeGameServices(idleDrain: drain)
+        defer { snapshot.release(); drain.release(); fake.finish() }
+        let (model, _, _) = try gameFixture(fake: fake, volumeEvents: source)
+        let path = URL(fileURLWithPath: "/Volumes/Games SSD/Game")
+        fake.setLocation(path, for: "genshin")
+        fake.setStatus(.installed(tag: "1.0"), for: "genshin")
+        model.setGameRecord("genshin", try await fake.record("genshin"))
+        model.updateGame("genshin")
+        let operation = try #require(model.gameTask)
+        var opened = fake.opened.stream.makeAsyncIterator(); _ = await opened.next()
+        if read == "snapshot" { fake.gateNextRecordRead(snapshot) }
+        else { fake.gateNextCacheInfoRead(snapshot) }
+        model.pauseGame("genshin")
+        await snapshot.waitUntilEntered()
+        let finished = Task { await operation.value; milestones.continuation.yield(false) }
+        defer { finished.cancel() }
+        fake.setStatus(.locationUnavailable(path), for: "genshin")
+        source.send(.unmounted(URL(fileURLWithPath: "/Volumes/Games SSD")))
+        snapshot.release()
+        var events = milestones.stream.makeAsyncIterator()
+        #expect(await events.next() == true)
+        #expect(model.gameOperation != nil)
+        #expect(model.games["genshin"]?.status == .locationUnavailable(path))
+        drain.release()
+        await operation.value; await model.volumeEventTask?.value
+        #expect(model.gameOperation == nil)
+        #expect(model.games["genshin"]?.status == .locationUnavailable(path))
+    }
+
+    @Test(.timeLimit(.minutes(1))) func completedUpdateRejectsEarlierVolumeSnapshot() async throws {
+        let read = GameReadGate(), source = TestVolumeEventSource()
+        let fake = FakeGameServices(locationRead: read)
+        defer { read.release(); fake.finish() }
+        let (model, _, _) = try gameFixture(fake: fake, volumeEvents: source)
+        let path = URL(fileURLWithPath: "/Volumes/Games SSD/Game")
+        fake.setLocation(path, for: "genshin")
+        fake.setStatus(.installed(tag: "1.0"), for: "genshin")
+        model.setGameRecord("genshin", try await fake.record("genshin"))
+        model.updateGame("genshin")
+        let operation = try #require(model.gameTask)
+        var opened = fake.opened.stream.makeAsyncIterator(); _ = await opened.next()
+        let target = InstalledBuild(tag: "2.0", buildID: "updated", categories: [], voices: ["en-us"])
+        var pending = try #require(try await fake.record("genshin"))
+        pending.pending = PendingOperation(kind: .update, planID: try SafeIdentifier("gated-update"),
+            planDigest: try Digest(algorithm: .sha256, hex: String(repeating: "a", count: 64)), target: target)
+        fake.setRecord(pending, for: "genshin")
+        model.setGameRecord("genshin", pending)
+        source.send(.mounted(URL(fileURLWithPath: "/Volumes/Games SSD")))
+        await read.waitUntilEntered()
+        var completed = pending; completed.pending = nil; completed.installed = target
+        fake.setRecord(completed, for: "genshin")
+        fake.setStatus(.installed(tag: "2.0"), for: "genshin")
+        fake.emit(.phase(.completed)); fake.finish()
+        await operation.value
+        #expect(model.gameRecord("genshin") == completed)
+        #expect(model.games["genshin"]?.status == .installed(tag: "2.0"))
+        read.release(); await model.volumeEventTask?.value
+        #expect(model.gameRecord("genshin") == completed)
+        #expect(model.games["genshin"]?.status == .installed(tag: "2.0"))
+    }
+
+    @Test(.timeLimit(.minutes(1)), arguments: ["/Volumes/Games SSD/Image", "/Volumes/Games SSD/Game 2",
+        "/System/Volumes/Data/Volumes/Games SSD/Image"])
+    func nestedOrSiblingMountDoesNotCancelTransfer(mount: String) async throws {
+        let source = TestVolumeEventSource(), fake = FakeGameServices()
+        defer { fake.finish() }
+        let (model, _, _) = try gameFixture(fake: fake, volumeEvents: source)
+        let path = URL(fileURLWithPath: "/Volumes/Games SSD/Game")
+        fake.setLocation(path, for: "genshin")
+        fake.setStatus(.installed(tag: "1.0"), for: "genshin")
+        model.setGameRecord("genshin", try await fake.record("genshin"))
+        model.updateGame("genshin")
+        let operation = try #require(model.gameTask)
+        var opened = fake.opened.stream.makeAsyncIterator(); _ = await opened.next()
+        source.send(.unmounted(URL(fileURLWithPath: mount)))
+        await model.volumeEventTask?.value
+        #expect(!operation.isCancelled)
+        #expect(model.gameLocationPauseReason(for: "genshin") == nil)
+        #expect(!fake.locationReads.contains("genshin"))
+        fake.setStatus(.installed(tag: "2.0"), for: "genshin")
+        fake.emit(.phase(.completed)); fake.finish(); await operation.value
+    }
+
+    @Test(.timeLimit(.minutes(1)), arguments: [false, true])
+    func nestedMountEjectMatchesContainedGameAcrossDataAlias(aliasInstall: Bool) async throws {
+        let source = TestVolumeEventSource(), fake = FakeGameServices()
+        defer { fake.finish() }
+        let (model, _, _) = try gameFixture(fake: fake, volumeEvents: source)
+        let path = URL(fileURLWithPath: aliasInstall ? "/System/Volumes/Data/Volumes/Games SSD/Image/Game" : "/Volumes/Games SSD/Image/Game")
+        let mount = URL(fileURLWithPath: aliasInstall ? "/Volumes/Games SSD/Image" : "/System/Volumes/Data/Volumes/Games SSD/Image")
+        fake.setLocation(path, for: "genshin")
+        fake.setStatus(.installed(tag: "1.0"), for: "genshin")
+        model.setGameRecord("genshin", try await fake.record("genshin"))
+        model.updateGame("genshin")
+        let operation = try #require(model.gameTask)
+        var opened = fake.opened.stream.makeAsyncIterator(); _ = await opened.next()
+        fake.setStatus(.locationUnavailable(path), for: "genshin")
+        source.send(.unmounted(mount))
+        #expect(operation.isCancelled)
+        await operation.value; await model.volumeEventTask?.value
+        #expect(model.gameLocationPauseReason(for: "genshin") == .installVolumeUnavailable)
+        #expect(model.games["genshin"]?.status == .locationUnavailable(path))
+    }
+
+    @Test func destinationOnlyRemountRetriesMoveRecoveryAndRefreshesSource() async throws {
+        let gate = GameReadGate(), source = TestVolumeEventSource(), fake = FakeGameServices(moveRecoveryRead: gate)
+        let (model, _, _) = try gameFixture(fake: fake, volumeEvents: source)
+        fake.setStatus(.installed(tag: "1.0"), for: "genshin")
+        await model.start()
+        fake.recoveryResult = ["genshin"]
+        source.send(.mounted(URL(fileURLWithPath: "/Volumes/Destination")))
+        await gate.waitUntilEntered()
+        #expect(model.isBusyForUpdates)
+        #expect(model.languageRestartBlocker != nil)
+        #expect(!model.canMoveGame("genshin"))
+        gate.release()
+        await model.volumeEventTask?.value
+        #expect(!model.isBusyForUpdates)
+        #expect(fake.moveRecoveryCount == 1)
+        #expect(fake.locationReads.contains("genshin"))
+        #expect(model.gameRecord("genshin")?.installPath == gameLocation)
+    }
+
+    @Test(.timeLimit(.minutes(1)), arguments: ["source", "destination", "reported"])
+    func ejectedMoveShowsRollbackMessageAndCanStartAgainAfterReconnect(drive: String) async throws {
+        let events = TestVolumeEventSource(), fake = FakeGameServices()
+        let (model, _, _) = try gameFixture(fake: fake, volumeEvents: events)
+        let source = URL(fileURLWithPath: "/Volumes/Source/Game")
+        let destination = URL(fileURLWithPath: "/Volumes/Destination")
+        fake.setLocation(source, for: "genshin")
+        fake.setStatus(.installed(tag: "1.0"), for: "genshin")
+        await model.start()
+        model.moveGame("genshin", to: destination)
+        let task = try #require(model.gameTask)
+        var opened = fake.opened.stream.makeAsyncIterator(); _ = await opened.next()
+        fake.emit(.phase(.staging))
+        for await phase in Observations({ model.gameMovePhase(for: "genshin") }) {
+            if phase == .copying { break }
+        }
+        let ejected = drive == "source" ? source.deletingLastPathComponent() : destination
+        if drive == "reported" { fake.emit(.failed(.installVolumeUnavailable)) }
+        else {
+            if drive == "source" { fake.setStatus(.locationUnavailable(source), for: "genshin") }
+            events.send(.unmounted(ejected))
+            #expect(task.isCancelled)
+        }
+        await task.value; await model.volumeEventTask?.value
+        #expect(model.lastError == String(localized: "A drive was disconnected, so the move stopped. The game stays in its original folder. Reconnect the drive and move it again."))
+        #expect(model.gameLocationPauseReason(for: "genshin") == nil)
+        #expect(model.gameOperation == nil)
+        #expect(model.gameRecord("genshin")?.installPath == source)
+        #expect(model.gameRecord("genshin")?.pending == nil)
+        fake.setStatus(.installed(tag: "1.0"), for: "genshin")
+        fake.recoveryResult = ["genshin"]
+        events.send(.mounted(ejected))
+        await model.volumeEventTask?.value
+        #expect(model.games["genshin"]?.status == .installed(tag: "1.0"))
+        let state = try #require(model.games["genshin"])
+        #expect(PrimaryAction.resolve(state, runtimesReady: true, rosetta: .installed) == .play)
+        #expect(model.gameLocationPauseReason(for: "genshin") == nil)
+        #expect(model.canMoveGame("genshin"))
+        model.moveGame("genshin", to: destination)
+        let retry = try #require(model.gameTask)
+        _ = await opened.next()
+        fake.emit(.phase(.completed)); fake.finish()
+        await retry.value
+        #expect(fake.calls.filter { $0.action == "move" }.count == 2)
+    }
+
+    @Test func ejectAfterMoveSwitchAsksForCleanupWithoutClaimingOriginalLocation() async throws {
+        let (model, fake, _) = try gameFixture()
+        fake.setStatus(.installed(tag: "1.0"), for: "genshin")
+        await model.start()
+        let folder = URL(fileURLWithPath: "/Volumes/Destination")
+        model.moveGame("genshin", to: folder)
+        let task = try #require(model.gameTask)
+        var opened = fake.opened.stream.makeAsyncIterator(); _ = await opened.next()
+        let moved = folder.appendingPathComponent(GameDefinition.all[0].defaultInstallDirectoryName)
+        fake.setLocation(moved, for: "genshin")
+        fake.emit(.failed(.installVolumeUnavailable))
+        await task.value
+        #expect(model.lastError == String(localized: "A drive was disconnected before the move finished cleaning up. Reconnect the drive to finish cleanup."))
+        #expect(model.gameRecord("genshin")?.installPath == moved)
+        #expect(model.gameLocationPauseReason(for: "genshin") == nil)
+    }
+
+    @Test func moveUsesGameReservationAndRefusesLanguageRestart() async throws {
+        let (model, fake, _) = try gameFixture()
+        fake.setStatus(.installed(tag: "1.0"), for: "genshin")
+        await model.start()
+        model.setGameRecord("genshin", try await fake.record("genshin"))
+        model.setGameState("genshin", GameState(status: .installed(tag: "1.0")))
+        #expect(model.canMoveGame("genshin"))
+        model.moveGame("genshin", to: URL(fileURLWithPath: "/tmp/move-model-test"))
+        let task = try #require(model.gameTask)
+        var opened = fake.opened.stream.makeAsyncIterator(); _ = await opened.next()
+        #expect(model.isBusyForUpdates)
+        #expect(model.gameOperation?.isMoving == true)
+        #expect(model.languageRestartBlocker == .unresumableOperation("genshin"))
+        #expect(!model.canMoveGame("genshin"))
+        fake.emit(.phase(.staging))
+        for await phase in Observations({ model.gameMovePhase(for: "genshin") }) {
+            if phase == .copying { break }
+        }
+        fake.emit(.progress(downloaded: 0, totalNetwork: 0, staged: 5, totalStaged: 10))
+        for await state in Observations({ model.games["genshin"] }) {
+            if case .working(_, let fraction, _, _, _) = state?.activity, fraction == 0.5 { break }
+        }
+        for (phase, expected) in [(OperationPhase.verifying, GameMovePhase.verifying), (.committing, .finishing)] {
+            fake.emit(.phase(phase))
+            for await current in Observations({ model.gameMovePhase(for: "genshin") }) {
+                if current == expected { break }
+            }
+        }
+        fake.emit(.phase(.completed)); fake.finish()
+        await task.value
+        #expect(model.gameOperation == nil)
+        #expect(model.gameMovePhase(for: "genshin") == nil)
+        #expect(fake.calls.contains { $0.action == "move" })
+    }
+
+    @Test(arguments: [GameStatus.paused(.update), .uninstallPaused, .notInstalled, .locationUnavailable(gameLocation)])
+    func moveMenuRejectsUnavailableOrPausedGames(status: GameStatus) async throws {
+        let (model, fake, _) = try gameFixture()
+        fake.setStatus(status, for: "genshin")
+        model.setGameRecord("genshin", try await fake.record("genshin"))
+        model.setGameState("genshin", GameState(status: status))
+        #expect(!model.canMoveGame("genshin"))
+    }
+
+    @Test(.timeLimit(.minutes(1)), arguments: ["install", "adopt"])
+    func unrelatedEjectDoesNotCancelFreshOperationBeforeRecordPublication(action: String) async throws {
+        let source = TestVolumeEventSource(), fake = FakeGameServices()
+        let (model, _, _) = try gameFixture(fake: fake, volumeEvents: source)
+        if action == "install" { model.installGame("genshin", voices: [], at: gameLocation, approved: true) }
+        else { model.adoptGame("genshin", folder: gameLocation, voices: []) }
+        let operation = try #require(model.gameTask)
+        var opened = fake.opened.stream.makeAsyncIterator(); _ = await opened.next()
+        #expect(model.gameRecord("genshin") == nil)
+        source.send(.unmounted(URL(fileURLWithPath: "/Volumes/Unrelated USB")))
+        await model.volumeEventTask?.value
+        #expect(!operation.isCancelled)
+        #expect(model.gameLocationPauseReason(for: "genshin") == nil)
+        fake.emit(.phase(.completed)); fake.finish()
+        await operation.value
+    }
+
+    @Test(.timeLimit(.minutes(1)), arguments: ["install", "adopt"])
+    func matchingEjectCancelsFreshExternalOperationBeforeRecordPublication(action: String) async throws {
+        let source = TestVolumeEventSource(), fake = FakeGameServices()
+        let (model, _, _) = try gameFixture(fake: fake, volumeEvents: source)
+        let path = URL(fileURLWithPath: "/Volumes/Games SSD/New Game")
+        fake.setLocation(path, for: "genshin")
+        if action == "install" { model.installGame("genshin", voices: [], at: path, approved: true) }
+        else { model.adoptGame("genshin", folder: path, voices: []) }
+        let operation = try #require(model.gameTask)
+        var opened = fake.opened.stream.makeAsyncIterator(); _ = await opened.next()
+        #expect(model.gameRecord("genshin") == nil)
+        fake.setStatus(.locationUnavailable(path), for: "genshin")
+        source.send(.unmounted(URL(fileURLWithPath: "/Volumes/Games SSD")))
+        #expect(operation.isCancelled)
+        await operation.value; await model.volumeEventTask?.value
+        #expect(model.gameLocationPauseReason(for: "genshin") == .installVolumeUnavailable)
+        #expect(model.games["genshin"]?.status == .locationUnavailable(path))
+        #expect(model.lastError == LauncherError.installVolumeUnavailable.userMessage)
+    }
+
+    @Test func playRechecksUnavailableLocationBeforeCallingLaunchService() async throws {
+        let launches = LocationLaunchSpy()
+        let (model, fake, _) = try gameFixture(launches: launches)
+        fake.setStatus(.installed(tag: "1.0"), for: "genshin")
+        model.setGameRecord("genshin", try await fake.record("genshin"))
+        model.setGameState("genshin", GameState(status: .installed(tag: "1.0")))
+        fake.setStatus(.locationUnavailable(gameLocation), for: "genshin")
+        model.play("genshin")
+        await model.launchTasks["genshin"]?.value
+        #expect(launches.count == 0)
+        #expect(model.games["genshin"]?.status == .locationUnavailable(gameLocation))
+        #expect(model.launchState(for: "genshin") == nil)
+        #expect(model.launchSlotOwner == nil)
+        #expect(!model.liveLaunchGames.contains("genshin"))
+    }
+
+    @Test func workspaceSourceDeliversInjectedMountAndUnmountNotifications() async throws {
+        let center = NotificationCenter(), source = WorkspaceVolumeEventSource(center: center)
+        let events = AsyncStream<VolumeEvent>.makeStream()
+        let observation = source.observe { events.continuation.yield($0) }
+        var iterator = events.stream.makeAsyncIterator()
+        let drive = URL(fileURLWithPath: "/Volumes/Games SSD")
+        center.post(name: NSWorkspace.didUnmountNotification, object: nil, userInfo: [NSWorkspace.volumeURLUserInfoKey: drive])
+        guard case .unmounted(let removed) = await iterator.next() else { Issue.record("Missing unmount event"); return }
+        #expect(removed == drive)
+        center.post(name: NSWorkspace.didMountNotification, object: nil)
+        guard case .mounted(let mounted) = await iterator.next() else { Issue.record("Missing mount event"); return }
+        #expect(mounted == nil)
+        withExtendedLifetime(observation) {}
+    }
+
+    @Test func volumeEventsRefreshBothRegionsWithoutRefreshingOtherDrives() async throws {
+        let source = TestVolumeEventSource(), fake = FakeGameServices()
+        let (model, _, _) = try gameFixture(fake: fake, volumeEvents: source)
+        let drive = URL(fileURLWithPath: "/Volumes/Games SSD")
+        for id in ["genshin", "genshin-cn", "zzz"] {
+            let path = URL(fileURLWithPath: id == "zzz" ? "/Volumes/Other/Game" : "/Volumes/Games SSD/\(id)")
+            fake.setLocation(path, for: id)
+            fake.setStatus(.installed(tag: "1.0"), for: id)
+            model.setGameRecord(id, try await fake.record(id))
+            model.setGameState(id, GameState(status: .installed(tag: "1.0")))
+        }
+        for id in ["genshin", "genshin-cn"] {
+            fake.setStatus(.locationUnavailable(try #require(model.gameRecord(id)).installPath), for: id)
+        }
+        source.send(.unmounted(drive))
+        await model.volumeEventTask?.value
+        #expect(Set(fake.locationReads) == ["genshin", "genshin-cn"])
+        #expect(model.unavailableVolumeName(for: "genshin-cn") == "Games SSD")
+        #expect(model.gameLocationHint(for: "genshin")?.contains("Games SSD") == true)
+        #expect(model.gameLocationURL(for: "genshin") == nil)
+        #expect(model.games["zzz"]?.status == .installed(tag: "1.0"))
+        fake.setStatus(.paused(.update), for: "genshin")
+        fake.setStatus(.installed(tag: "1.0"), for: "genshin-cn")
+        source.send(.mounted(drive))
+        await model.volumeEventTask?.value
+        #expect(model.games["genshin"]?.status == .paused(.update))
+        #expect(model.games["genshin-cn"]?.status == .installed(tag: "1.0"))
+        #expect(model.unavailableVolumeName(for: "genshin") == nil)
+        #expect(model.gameLocationURL(for: "genshin") == model.gameRecord("genshin")?.installPath)
+        #expect(fake.statusCount == 0)
+    }
+
+    @Test func unknownVolumeEventRechecksAllKnownLocations() async throws {
+        let source = TestVolumeEventSource(), fake = FakeGameServices()
+        let (model, _, _) = try gameFixture(fake: fake, volumeEvents: source)
+        for id in ["genshin", "zzz-cn"] {
+            fake.setStatus(.installed(tag: "1.0"), for: id)
+            model.setGameRecord(id, try await fake.record(id))
+        }
+        source.send(.mounted(nil))
+        await model.volumeEventTask?.value
+        #expect(Set(fake.locationReads) == ["genshin", "zzz-cn"])
+    }
+
+    @Test(arguments: ["update", "verify", "uninstall", "resume", "voices"])
+    func unavailableLocationIsRecheckedBeforeOperation(action: String) async throws {
+        let (model, fake, _) = try gameFixture(); defer { fake.finish() }
+        fake.setStatus(.installed(tag: "1.0"), for: "genshin")
+        model.setGameRecord("genshin", try await fake.record("genshin"))
+        model.setGameState("genshin", GameState(status: .installed(tag: "1.0")))
+        fake.setStatus(.locationUnavailable(gameLocation), for: "genshin")
+        switch action {
+        case "update": model.updateGame("genshin")
+        case "verify": model.verifyGame("genshin")
+        case "resume": model.resumeGame("genshin")
+        case "voices": model.setVoices("genshin", ["en-us"])
+        default: await model.uninstallGame("genshin")
+        }
+        await model.gameTask?.value
+        #expect(fake.calls.isEmpty)
+        #expect(model.games["genshin"]?.status == .locationUnavailable(gameLocation))
+        #expect(!model.isGameOperationRunning)
+    }
+
+    @Test(.timeLimit(.minutes(1))) func ejectCancelsOnlyAffectedOperationAndKeepsPauseReasonAfterReconnect() async throws {
+        let drain = GameReadGate()
+        defer { drain.release() }
+        let source = TestVolumeEventSource(), fake = FakeGameServices(idleDrain: drain)
+        let (model, _, _) = try gameFixture(fake: fake, volumeEvents: source)
+        let path = URL(fileURLWithPath: "/Volumes/Games SSD/Game")
+        fake.setLocation(path, for: "genshin")
+        fake.setStatus(.installed(tag: "1.0"), for: "genshin")
+        model.setGameRecord("genshin", try await fake.record("genshin"))
+        model.updateGame("genshin")
+        let operation = try #require(model.gameTask)
+        var opened = fake.opened.stream.makeAsyncIterator(); _ = await opened.next()
+        source.send(.unmounted(URL(fileURLWithPath: "/Volumes/Other")))
+        await model.volumeEventTask?.value
+        #expect(!operation.isCancelled)
+        fake.setStatus(.locationUnavailable(path), for: "genshin")
+        source.send(.unmounted(URL(fileURLWithPath: "/Volumes/Games SSD")))
+        await drain.waitUntilEntered()
+        #expect(model.gameOperation != nil)
+        #expect(model.games["genshin"]?.status == .locationUnavailable(path))
+        drain.release()
+        await operation.value; await model.volumeEventTask?.value
+        #expect(operation.isCancelled)
+        #expect(model.gameLocationPauseReason(for: "genshin") == .installVolumeUnavailable)
+        #expect(model.games["genshin"]?.status == .locationUnavailable(path))
+        fake.setStatus(.paused(.update), for: "genshin")
+        source.send(.mounted(URL(fileURLWithPath: "/Volumes/Games SSD")))
+        await model.volumeEventTask?.value
+        #expect(model.games["genshin"]?.status == .paused(.update))
+        #expect(model.gameLocationPauseReason(for: "genshin") == .installVolumeUnavailable)
+        #expect(fake.calls.count == 1)
+    }
+
     @Test func verifyByteProgressReachesGameTimingAndPauseClearsIt() async throws {
         let (model, fake, clock) = try gameFixture(); defer { fake.finish() }
         fake.setStatus(.installed(tag: "1.0"), for: "genshin")
@@ -227,32 +761,6 @@ struct AppModelGamesTests {
         try await gamesEventually { fake.statusCount == 6 }
     }
 
-    @Test func volumeMountRefreshesUnavailableLocationsWithinTheThrottle() async throws {
-        let center = NotificationCenter()
-        let (model, fake, _) = try gameFixture(volumeCenter: center)
-        let external = URL(fileURLWithPath: "/Volumes/Games SSD/MacGacha/ZenlessZoneZero", isDirectory: true)
-        fake.setInstallPath(external, for: "zzz")
-        fake.setStatus(.locationUnavailable(external), for: "zzz")
-        fake.setStatus(.installed(tag: "1.0"), for: "genshin")
-        await model.start()
-        #expect(model.games["zzz"] == GameState(status: .locationUnavailable(external)))
-        // The drive is connected inside the ten-minute refresh throttle.
-        fake.setStatus(.installed(tag: "1.0"), for: "zzz")
-        fake.setStatus(.updateAvailable(from: "1.0", to: "1.1"), for: "genshin")
-        try await gamesEventually {
-            center.post(name: NSWorkspace.didMountNotification, object: nil)
-            return model.games["zzz"] == GameState(status: .installed(tag: "1.0"))
-        }
-        // Internal-disk games are not re-read by a volume change.
-        #expect(model.games["genshin"] == GameState(status: .installed(tag: "1.0")))
-        // Unplugging reports the location as unavailable again.
-        fake.setStatus(.locationUnavailable(external), for: "zzz")
-        try await gamesEventually {
-            center.post(name: NSWorkspace.didUnmountNotification, object: nil)
-            return model.games["zzz"] == GameState(status: .locationUnavailable(external))
-        }
-    }
-
     @Test func progressKeepsPhaseThrottlesAndUsesFiveSecondSpeed() async throws {
         let (model, fake, clock) = try gameFixture(); defer { fake.finish() }
         model.installGame("genshin", voices: [], at: gameLocation, approved: true)
@@ -375,7 +883,9 @@ struct AppModelGamesTests {
 
     @Test func droppingModelCancelsActiveGameStream() async throws {
         let fake = FakeGameServices()
-        var model: AppModel? = AppModel(manifest: try RuntimeManifest(components: []), services: PreviewRuntimeServices(),
+        let root = URL(fileURLWithPath: "/tmp/macgacha-game-lifetime-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        var model: AppModel? = AppModel(paths: AppPaths(root: root), manifest: try RuntimeManifest(components: []), services: PreviewRuntimeServices(),
             defaults: nil, gameServices: fake)
         weak let reference = model
         model?.installGame("genshin", voices: [], at: gameLocation, approved: true)
@@ -507,12 +1017,11 @@ struct AppModelGamesTests {
 }
 
 private let gameLocation = URL(fileURLWithPath: "/inert/Games/Genshin")
-@MainActor private func gameFixture(fake: FakeGameServices = FakeGameServices(), purgeable: any PurgeableSpaceProbe = GamePurgeableProbe(bytes: nil),
-    volumeCenter: NotificationCenter = NotificationCenter()) throws -> (AppModel, FakeGameServices, GameTestClock) {
+@MainActor private func gameFixture(fake: FakeGameServices = FakeGameServices(), purgeable: any PurgeableSpaceProbe = GamePurgeableProbe(bytes: nil), volumeEvents: any VolumeEventSource = TestVolumeEventSource(), launches: any LaunchServices = PreviewLaunchServices(), notifications: any GameNotificationCenter = EmptyGameNotificationCenter()) throws -> (AppModel, FakeGameServices, GameTestClock) {
     let clock = GameTestClock()
     let model = AppModel(paths: AppPaths(root: URL(fileURLWithPath: "/inert/AppSupport")),
         manifest: try RuntimeManifest(components: []), services: PreviewRuntimeServices(), defaults: nil,
-        gameServices: fake, volumeCenter: volumeCenter, purgeable: purgeable, now: { clock.time })
+        gameServices: fake, volumeEvents: volumeEvents, purgeable: purgeable, launchServices: launches, notifications: notifications, notificationIsFrontmost: { false }, now: { clock.time })
     return (model, fake, clock)
 }
 @MainActor private func gamesEventually(_ condition: () -> Bool) async throws {
@@ -536,18 +1045,27 @@ private final class FakeGameServices: GameServices, Sendable {
     let opened = AsyncStream<Void>.makeStream()
     private let approvalTerminalRead: GameReadGate?
     private let snapshotRead: GameReadGate?
+    private let idleDrain: GameReadGate?
+    private let locationRead: GameReadGate?
+    private let moveRecoveryRead: GameReadGate?
     private let estimateReads: [Set<String>: GameReadGate]
-    init(approvalTerminalRead: GameReadGate? = nil, snapshotRead: GameReadGate? = nil, estimateReads: [Set<String>: GameReadGate] = [:]) {
+    init(approvalTerminalRead: GameReadGate? = nil, snapshotRead: GameReadGate? = nil, idleDrain: GameReadGate? = nil, locationRead: GameReadGate? = nil, moveRecoveryRead: GameReadGate? = nil, estimateReads: [Set<String>: GameReadGate] = [:]) {
         self.approvalTerminalRead = approvalTerminalRead; self.snapshotRead = snapshotRead
-        self.estimateReads = estimateReads
+        self.estimateReads = estimateReads; self.idleDrain = idleDrain; self.locationRead = locationRead; self.moveRecoveryRead = moveRecoveryRead
     }
     private struct State: Sendable {
         var statuses: [String: GameStatus] = [:]
-        var installPaths: [String: URL] = [:]
+        var records: [String: GameRecord] = [:]
+        var nextRecordRead: GameReadGate?
+        var nextCacheInfoRead: GameReadGate?
+        var locations: [String: URL] = [:]
+        var locationReads: [String] = []
         var calls: [GameCall] = []
         var continuation: AsyncThrowingStream<OperationEvent, any Error>.Continuation?
         var active: String?
         var starts = 0, statusReads = 0, terminations = 0
+        var recoveredMoves: [String] = []
+        var moveRecoveries = 0
         var estimates: [GameCall] = []
         var estimateError: LauncherError?
     }
@@ -556,6 +1074,33 @@ private final class FakeGameServices: GameServices, Sendable {
         get { state.withLock { $0.estimateError } }
         set { state.withLock { $0.estimateError = newValue } }
     }
+    var recoveryResult: [String] {
+        get { state.withLock { $0.recoveredMoves } }
+        set { state.withLock { $0.recoveredMoves = newValue } }
+    }
+    var moveRecoveryCount: Int { state.withLock { $0.moveRecoveries } }
+    func recoverPendingMoves() async -> [String] {
+        await moveRecoveryRead?.wait()
+        return state.withLock { $0.moveRecoveries += 1; return $0.recoveredMoves }
+    }
+    var locationReads: [String] { state.withLock { $0.locationReads } }
+    func setLocation(_ path: URL, for id: String) { state.withLock { $0.locations[id] = path } }
+    func locationStatus(_ id: String) async throws -> GameStatus {
+        let captured = state.withLock { $0.locationReads.append(id); return $0.statuses[id] ?? .notInstalled }
+        await locationRead?.wait()
+        return captured
+    }
+    func gateNextRecordRead(_ gate: GameReadGate) { state.withLock { $0.nextRecordRead = gate } }
+    func gateNextCacheInfoRead(_ gate: GameReadGate) { state.withLock { $0.nextCacheInfoRead = gate } }
+    func setRecord(_ record: GameRecord, for id: String) { state.withLock { $0.records[id] = record } }
+    func preDownloadInfo(_ id: String, refresh: Bool) async throws -> PreDownloadInfo {
+        let gate = state.withLock { let value = $0.nextCacheInfoRead; $0.nextCacheInfoRead = nil; return value }
+        await gate?.wait()
+        return .unavailable
+    }
+    func requireGameLocationAvailable(_ id: String) async throws {
+        if case .locationUnavailable = state.withLock({ $0.statuses[id] }) { throw LauncherError.installVolumeUnavailable }
+    }
     var estimateCalls: [GameCall] { state.withLock { $0.estimates } }
     var calls: [GameCall] { state.withLock { $0.calls } }
     var startCount: Int { state.withLock { $0.starts } }
@@ -563,19 +1108,21 @@ private final class FakeGameServices: GameServices, Sendable {
     var terminated: Int { state.withLock { $0.terminations } }
     func start() async { state.withLock { $0.starts += 1 }
     }
-    func waitUntilIdle(_ id: String) async throws {}
+    func waitUntilIdle(_ id: String) async throws { await idleDrain?.wait() }
     func checkForUpdate(_ id: String) async throws -> GameStatus { await status(id) }
     func status(_ id: String) async -> GameStatus { state.withLock { $0.statusReads += 1; return $0.statuses[id] ?? .notInstalled } }
     func record(_ id: String) async throws -> GameRecord? {
+        let gate = state.withLock { let value = $0.nextRecordRead; $0.nextRecordRead = nil; return value }
+        await gate?.wait()
         await snapshotRead?.wait()
-        let (status, path) = state.withLock { ($0.statuses[id] ?? .notInstalled, $0.installPaths[id] ?? gameLocation) }
+        if let record = state.withLock({ $0.records[id] }) { return record }
+        let status = state.withLock { $0.statuses[id] ?? .notInstalled }
         if status == .notInstalled || status == .unknown { return nil }
         let build = InstalledBuild(tag: "1.0", buildID: "fixture", categories: [], voices: ["en-us"])
-        return GameRecord(installPath: path, ownership: .created, executable: try SafeRelativePath("Game.exe"), installed: build,
+        return GameRecord(installPath: state.withLock { $0.locations[id] } ?? gameLocation, ownership: .created, executable: try SafeRelativePath("Game.exe"), installed: build,
             installIdentity: FileSystemIdentity(volumeUUID: nil, device: 1, inode: 1))
     }
     func setStatus(_ status: GameStatus, for id: String) { state.withLock { $0.statuses[id] = status } }
-    func setInstallPath(_ path: URL, for id: String) { state.withLock { $0.installPaths[id] = path } }
     func estimate(_ id: String, voices: Set<String>, at location: URL) async throws -> GameEstimate {
         let error = state.withLock { $0.estimates.append(GameCall(action: "estimate", id: id, voices: voices)); return $0.estimateError }
         await estimateReads[voices]?.wait()
@@ -600,13 +1147,16 @@ private final class FakeGameServices: GameServices, Sendable {
     func setVoices(_ id: String, _ voices: Set<String>) async -> AsyncThrowingStream<OperationEvent, any Error> {
         open(GameCall(action: "voices", id: id, voices: voices), kind: .voices)
     }
+    func move(_ id: String, to folder: URL) async -> GameEventStream {
+        open(GameCall(action: "move", id: id), kind: .repair)
+    }
     func uninstall(_ id: String) async throws {
         state.withLock { $0.calls.append(GameCall(action: "uninstall", id: id)); $0.statuses[id] = .notInstalled }
     }
     private func open(_ call: GameCall, kind: PendingOperation.Kind) -> AsyncThrowingStream<OperationEvent, any Error> {
         let pair = AsyncThrowingStream<OperationEvent, any Error>.makeStream()
         pair.continuation.onTermination = { [weak self] _ in self?.state.withLock { $0.terminations += 1 } }
-        state.withLock { $0.calls.append(call); $0.active = call.id; $0.statuses[call.id] = .paused(kind); $0.continuation = pair.continuation }
+        state.withLock { $0.calls.append(call); $0.active = call.id; if call.action != "move" { $0.statuses[call.id] = .paused(kind) }; $0.continuation = pair.continuation }
         opened.continuation.yield(())
         if call.action == "install", let approvalTerminalRead {
             let source = SuspendedApprovalEvents(terminal: approvalTerminalRead)
@@ -631,6 +1181,10 @@ private final class FakeGameServices: GameServices, Sendable {
 }
 
 private final class GameReadGate: Sendable {
+    private let onEntry: @Sendable () -> Void
+    init(onEntry: @escaping @Sendable () -> Void = {}) { self.onEntry = onEntry }
+    private let enteredEvents = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+    func waitUntilEntered() async { var iterator = enteredEvents.stream.makeAsyncIterator(); _ = await iterator.next() }
     private struct State {
         var entered = false, released = false
         var continuation: CheckedContinuation<Void, Never>?
@@ -641,6 +1195,8 @@ private final class GameReadGate: Sendable {
         await withCheckedContinuation { continuation in
             let released = state.withLock {
                 $0.entered = true
+                onEntry()
+                enteredEvents.continuation.yield(())
                 if $0.released { return true }
                 $0.continuation = continuation
                 return false
@@ -711,4 +1267,30 @@ private struct GameAllocationFailureOps: FileOps {
     func unlink(_ name: String, in directory: Int32, isDirectory: Bool) throws {
         try SystemFileOps().unlink(name, in: directory, isDirectory: isDirectory)
     }
+}
+
+@MainActor private final class TestVolumeEventSource: VolumeEventSource {
+    private var receive: (@MainActor @Sendable (VolumeEvent) -> Void)?
+    func observe(_ receive: @escaping @MainActor @Sendable (VolumeEvent) -> Void) -> any Sendable {
+        self.receive = receive
+        return UUID()
+    }
+    func send(_ event: VolumeEvent) { receive?(event) }
+}
+
+private final class LocationLaunchSpy: LaunchServices, Sendable {
+    private let launches = Mutex(0)
+    var count: Int { launches.withLock { $0 } }
+    func reattach() async throws -> [String: LaunchSession] { [:] }
+    func launch(game: GameDefinition, record: GameRecord) async throws -> AsyncStream<LaunchEvent> {
+        launches.withLock { $0 += 1 }
+        return AsyncStream { $0.finish() }
+    }
+    func observation(_ id: String) async throws -> LaunchObservation? { nil }
+    func recover(_ id: String) async throws {}
+    func session(_ id: String) async -> LaunchSession? { nil }
+    func gameProcessIDs(_ id: String) async -> [Int32] { [] }
+    func markReady(_ id: String) async {}
+    func notices() async throws -> [RecoveryNotice] { [] }
+    func acknowledge(_ id: UUID) async throws {}
 }

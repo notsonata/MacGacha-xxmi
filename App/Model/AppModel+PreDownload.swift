@@ -49,7 +49,10 @@ struct PreDownloadOverlay: Sendable, Equatable {
         }
         guard !Task.isCancelled else { return }
         for (id, info) in results where preDownloadRevisions[id] == revisions[id] && gameOperation?.id != id {
-            if let info { preDownloads[id] = PreDownloadOverlay(info: info) }
+            if let info {
+                preDownloads[id] = PreDownloadOverlay(info: info)
+                if info.state == .available { notify(.preDownloadAvailable, gameID: id, version: info.version) }
+            }
         }
     }
 
@@ -84,7 +87,7 @@ struct PreDownloadOverlay: Sendable, Equatable {
         guard gameOperation == nil else { show(LauncherError.busy("another game operation is running")); return nil }
         guard launchSlotOwner != id, launchTasks[id] == nil, !liveLaunchGames.contains(id) else { return nil }
         if case .recoveryNeeded = launchStates[id] { return nil }
-        let token = GameOperationToken(id: id, generation: UUID(), isUninstall: deleting, isPreDownload: true)
+        let token = GameOperationToken(id: id, generation: UUID(), isUninstall: deleting, isPreDownload: true, installPath: gameRecords[id]?.installPath)
         gameOperation = token; gameRevisions[id] = token.generation; preDownloadRevisions[id] = token.generation
         gameUpdateCheck[id] = nil
         gameProgress = GameProgress(); dismissError()
@@ -101,17 +104,24 @@ struct PreDownloadOverlay: Sendable, Equatable {
         let services = gameServices, startup = ensureGameStartup()
         let savedID = expectedPlanID ?? preDownloads[id]?.info.planID?.rawValue
         gameTask = Task { [weak self] in
-            var completed = false, failed = false
+            var completed = false, failed = false, notifyCompletion = true
             do {
                 await startup.value
                 try Task.checkCancellation()
                 if let error = self?.launchStartupError { throw error }
+                if resume {
+                    // Durable readiness may have advanced while the app was closed.
+                    let initial = try? await services.preDownloadInfo(id, refresh: false)
+                    notifyCompletion = initial.map { $0.state != .ready } ?? false
+                }
                 if let expectedPlanDigest {
                     let info = try await services.preDownloadInfo(id, refresh: false)
                     guard info.state == .paused, info.planID?.rawValue == savedID, info.planDigest == expectedPlanDigest else {
                         throw LauncherError.cancelled
                     }
                 }
+                try await self?.recheckGameLocation(id)
+                self?.gameLocationPauseReasons[id] = nil
                 let stream = if resume { await services.resumePreDownload(id, expectedPlanID: savedID) }
                     else { await services.preDownload(id) }
                 events: for try await event in stream {
@@ -136,7 +146,7 @@ struct PreDownloadOverlay: Sendable, Equatable {
                 failed = error != .cancelled
                 self?.show(error)
             }
-            await self?.finishPreDownload(token, services: services, completed: completed, failed: failed)
+            await self?.finishPreDownload(token, services: services, completed: completed, failed: failed, notifyCompletion: notifyCompletion)
         }
     }
 
@@ -157,7 +167,7 @@ struct PreDownloadOverlay: Sendable, Equatable {
         overlay.state = .downloading(progress); preDownloads[id] = overlay
     }
 
-    private func finishPreDownload(_ token: GameOperationToken, services: any GameServices, completed: Bool, failed: Bool) async {
+    private func finishPreDownload(_ token: GameOperationToken, services: any GameServices, completed: Bool, failed: Bool, notifyCompletion: Bool = true) async {
         // Cancellation of the consumer must not cancel the pipeline join or local status read.
         let (drained, result) = await Task.detached { () -> (Bool, Result<PreDownloadInfo, LauncherError>) in
             // Finishing cache readers does not need the global mutation lease;
@@ -168,6 +178,8 @@ struct PreDownloadOverlay: Sendable, Equatable {
             catch { return (true, .failure(launcherError(error))) }
         }.value
         guard gameOperation == token else { return }
+        if completed && notifyCompletion && !token.isUninstall { notify(.preDownloadFinished, gameID: token.id) }
+        if let reason = gameLocationPauseReasons[token.id], !completed { show(reason) }
         switch result {
         case .success(let info):
             preDownloads[token.id] = PreDownloadOverlay(info: info)

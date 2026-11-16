@@ -5,10 +5,22 @@ import LauncherCore
 import DownloadEngine
 
 public struct PrefixManager: Sendable {
-    private let paths: AppPaths
+    let paths: AppPaths
     private let runner: any ProcessRunner
-    private let inspector: any ProcessInspector
-    private let serverProbe: WineServerProbe
+    let inspector: any ProcessInspector
+    let serverProbe: WineServerProbe
+/// Storage cleanup owns the edition's session lock and this prefix's sibling
+/// preparation lock. Confirm kernel process/server idleness before removing it.
+package func removeStoragePrefix(at path: SafeRelativePath) throws {
+    guard path.components.count == 2, path.components[0] == "Prefixes" else { throw LauncherError.io("Invalid prefix cleanup target") }
+    let fs = try ContainedFileSystem(root: paths.root)
+    guard let prefix = try fs.pinDirectoryIfPresent(at: path) else { throw LauncherError.busy("Prefix disappeared") }
+    try PrefixShellFolders.requireIdle(prefix: path.resolved(against: paths.root), prefixFS: prefix,
+        wineBinary: paths.runtimes.appendingPathComponent("wine"), runtimeRoot: paths.runtimes,
+        inspector: inspector, serverProbe: serverProbe)
+    try Task.checkCancellation()
+    try fs.removeItem(at: path)
+}
     static let markerLimit = 16_384
 
     public init(paths: AppPaths, runner: any ProcessRunner, inspector: any ProcessInspector = SystemProcessInspector(), wineServerRoot: URL? = nil) {
@@ -58,6 +70,7 @@ public struct PrefixManager: Sendable {
             let fs = try ContainedFileSystem(root: paths.root)
             let lock = try await Self.acquireLock(fs: fs, prefix: prefix)
             defer { withExtendedLifetime(lock) {} }
+            try sweepRetiredPrefix(for: prefix, fs: fs)
             try fs.createDirectory(at: prefix)
             // Validate every Prefixes ancestor immediately before crossing the process boundary.
             _ = try fs.directoryURL(at: prefix)
@@ -83,7 +96,8 @@ public struct PrefixManager: Sendable {
                 // Persist uncertainty before Wine can modify the initialized tree.
                 // Failed/cancelled upgrades remain upgrading for every runtime request.
                 let upgrading = PrefixMarker(schemaVersion: PrefixMarker.schema, game: game, backend: identifier,
-                    state: .upgrading, wineBinaryPath: binary.path, wineBinaryIdentity: identity, createdAt: existing.createdAt, bundleID: runtimeDigest == nil ? nil : identifier, runtimeDigest: runtimeDigest)
+                    state: .upgrading, wineBinaryPath: binary.path, wineBinaryIdentity: identity, createdAt: existing.createdAt, bundleID: runtimeDigest == nil ? nil : identifier, runtimeDigest: runtimeDigest,
+                    nativeProxyOverrides: existing.nativeProxyOverrides)
                 try Self.writeMarker(upgrading, fs: fs, to: marker, pending: pending)
                 arguments = ["wineboot", "-u"]
             } else {
@@ -118,7 +132,8 @@ public struct PrefixManager: Sendable {
                 try await finishShellFolders(prefixFS, prefix: url, wineBinary: binary, environment: environment)
             }
             let readiness = PrefixMarker(schemaVersion: PrefixMarker.schema, game: game, backend: identifier,
-                state: .ready, wineBinaryPath: binary.path, wineBinaryIdentity: identity, createdAt: existing?.createdAt ?? Date(), bundleID: runtimeDigest == nil ? nil : identifier, runtimeDigest: runtimeDigest)
+                state: .ready, wineBinaryPath: binary.path, wineBinaryIdentity: identity, createdAt: existing?.createdAt ?? Date(), bundleID: runtimeDigest == nil ? nil : identifier, runtimeDigest: runtimeDigest,
+                nativeProxyOverrides: existing?.nativeProxyOverrides)
             try Self.writeMarker(readiness, fs: fs, to: marker, pending: pending)
             return url
         } catch {
@@ -191,6 +206,10 @@ public struct PrefixManager: Sendable {
         let data: Data
         do { data = try fs.readFile(at: path, maxBytes: Self.markerLimit) }
         catch LauncherError.cancelled { throw LauncherError.cancelled }
+        catch let error as LauncherError {
+            if case .fileTooLarge = error { throw error }
+            return nil
+        }
         catch { return nil }
         let decoder = JSONDecoder()
         // Honor a different backend even if the rest of its marker is incomplete.
@@ -198,8 +217,16 @@ public struct PrefixManager: Sendable {
             throw LauncherError.io("Prefix backend mismatch")
         }
         decoder.dateDecodingStrategy = .iso8601
+        // A claimed registry transaction must never turn decode failure into
+        // permission to reset the prefix and discard its recovery ownership.
+        let header = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        let claimsOwnership = header?["nativeProxyOverrides"].map { !($0 is NSNull) } ?? false
         guard let marker = try? decoder.decode(PrefixMarker.self, from: data),
-              marker.schemaVersion == PrefixMarker.schema, marker.createdAt.timeIntervalSince1970.isFinite else { return nil }
+              marker.schemaVersion == PrefixMarker.schema, marker.createdAt.timeIntervalSince1970.isFinite else {
+            if claimsOwnership { throw LauncherError.io("Prefix with native proxy ownership requires recovery; it cannot be reset") }
+            return nil
+        }
+        try marker.nativeProxyOverrides?.validate()
         if let storedGame = marker.game, storedGame != game { throw LauncherError.io("Prefix game mismatch") }
         return marker
     }
@@ -228,9 +255,47 @@ struct PrefixMarker: Codable {
     let bundleID: String?
     let runtimeDigest: Digest?
     var provisioningRevision: Int? = nil
+    /// Present only while this app owns the ZZZ native-proxy per-app overrides. Wine upgrades
+    /// carry it forward so a later cleanup still knows which registry values are ours.
+    var nativeProxyOverrides: NativeProxyOverrideOwnership? = nil
 
     enum CodingKeys: String, CodingKey {
-        case schemaVersion, game, backend, state, wineBinaryPath, wineBinaryIdentity, createdAt, bundleID, runtimeDigest, provisioningRevision
+        case schemaVersion, game, backend, state, wineBinaryPath, wineBinaryIdentity, createdAt, bundleID, runtimeDigest, provisioningRevision, nativeProxyOverrides
+    }
+}
+
+/// Durable claim on exactly two Wine per-app DLL override values for Global Zenless Zone Zero.
+/// The record is fixed-content: any other target, value name, or text is rejected before use,
+/// so the marker can never widen what cleanup is allowed to delete.
+struct NativeProxyOverrideOwnership: Codable, Equatable, Sendable {
+    static let schema = 1
+    static let game = "zzz"
+    static let target = "ZenlessZoneZero.exe"
+    static let overrideText = "native,builtin"
+    static let valueNames = ["d3d11", "d3dcompiler_47"]
+
+    let schemaVersion: Int
+    let game: String
+    let target: String
+    /// Value name to exact REG_SZ text this app may write and later delete.
+    let values: [String: String]
+    /// The per-app key was absent when ownership was recorded, so it may be removed once provably empty.
+    let createdAppKey: Bool
+    let createdOverridesKey: Bool
+
+    static func record(createdAppKey: Bool, createdOverridesKey: Bool) -> Self {
+        Self(schemaVersion: schema, game: game, target: target,
+            values: Dictionary(uniqueKeysWithValues: valueNames.map { ($0, overrideText) }),
+            createdAppKey: createdAppKey, createdOverridesKey: createdOverridesKey)
+    }
+
+    func validate() throws {
+        // The app key can only have been created together with its DllOverrides child.
+        guard schemaVersion == Self.schema, game == Self.game, target == Self.target,
+              values == Self.record(createdAppKey: false, createdOverridesKey: false).values,
+              !createdAppKey || createdOverridesKey else {
+            throw LauncherError.io("Native proxy override ownership record is invalid")
+        }
     }
 }
 
@@ -249,5 +314,6 @@ extension PrefixMarker {
         bundleID = try container.decodeIfPresent(String.self, forKey: .bundleID)
         runtimeDigest = try container.decodeIfPresent(Digest.self, forKey: .runtimeDigest)
         provisioningRevision = try container.decodeIfPresent(Int.self, forKey: .provisioningRevision)
+        nativeProxyOverrides = try container.decodeIfPresent(NativeProxyOverrideOwnership.self, forKey: .nativeProxyOverrides)
     }
 }

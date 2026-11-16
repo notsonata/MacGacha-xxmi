@@ -9,7 +9,7 @@ import SwiftUI
 
 /// Sheets that act on one game, opened from its footer.
 enum GameSheet: Identifiable, Hashable {
-    case install(String), voices(String), settings(String), setup(String), rosetta(String)
+    case install(String), voices(String), settings(String), setup(String), rosetta(String), wishExport(String)
 
     var id: String {
         switch self {
@@ -18,6 +18,7 @@ enum GameSheet: Identifiable, Hashable {
         case .settings(let game): "settings-\(game)"
         case .setup(let game): "setup-\(game)"
         case .rosetta(let game): "rosetta-\(game)"
+        case .wishExport(let game): "wish-export-\(game)"
         }
     }
 }
@@ -32,6 +33,8 @@ struct GameFooter: View {
     @Binding var panel: Panel?
     @Binding var gameSheet: GameSheet?
     @Binding var animated: Bool
+    /// The slide on screen has its own video, so there is something to switch to.
+    var slideHasVideo = false
     @State private var confirmingParts = false
     @State private var confirmingUninstall = false
     @State private var confirmingModsRisk = false
@@ -62,12 +65,26 @@ struct GameFooter: View {
                 if showsPreDownload {
                     PreDownloadBar(game: game, gameIsLive: launch.map { if case .failed = $0 { false } else { true } } ?? false)
                 }
+                if let installedVersion {
+                    HStack(spacing: 8) {
+                        InfoCapsule(text: installedVersion, systemImage: nil)
+                            .accessibilityLabel(Text("Version \(installedVersion)", comment: "A dependency's version or build number, e.g. Version 11.0-1"))
+                        if let playTime {
+                            InfoCapsule(text: TimeText.duration(playTime.totalSeconds), systemImage: "clock")
+                                .help(TimeText.lastSession(playTime))
+                                .accessibilityLabel(Text(verbatim: TimeText.played(playTime.totalSeconds)))
+                                .accessibilityHint(Text(verbatim: TimeText.lastSession(playTime)))
+                        }
+                    }
+                }
+                let line = action == .progress && progressHovered ? state.progressDetail ?? statusLine : statusLine
+                if !line.isEmpty || launchLogAvailable {
                 HStack(spacing: 8) {
                     // Hovering the progress capsule swaps the hint for the numbers, as HoYoPlay does.
-                    Text(action == .progress && progressHovered ? state.progressDetail ?? statusLine : statusLine)
+                    Text(line)
                         .monospacedDigit()
                         .contentTransition(.opacity)
-                    if case .failed(let failure) = launch, failure.hasLog, model.sessionLogsEnabled {
+                    if launchLogAvailable {
                         Button("Open Log") { model.openLaunchLog(game.id) }
                             .buttonStyle(.link)
                             .underline()
@@ -76,6 +93,7 @@ struct GameFooter: View {
                 .font(.callout)
                 .foregroundStyle(.white.opacity(0.85))
                 .shadow(color: .black.opacity(0.4), radius: 3)
+                }
                 if let held = state.spaceShortage?.heldByMacOS {
                     PurgeableSpaceHint(bytes: held)
                         .foregroundStyle(.white.opacity(0.85))
@@ -92,12 +110,15 @@ struct GameFooter: View {
                     }
                 }
                 HStack(spacing: 10) {
-                    if art?.video != nil {
+                    if slideHasVideo {
                         backgroundToggle
                     }
                     if showsMenu {
                         GameMenu(game: game, state: state, gameSheet: $gameSheet, confirmingUninstall: $confirmingUninstall,
                             confirmingPreDownloadDeletion: $confirmingPreDownloadDeletion)
+                    }
+                    if showsPreDownload {
+                        PreDownloadButton(game: game, gameIsLive: launch.map { if case .failed = $0 { false } else { true } } ?? false)
                     }
                     PrimaryActionButton(game: game, action: action, state: state, panel: $panel,
                         gameSheet: $gameSheet, confirmingParts: $confirmingParts, confirmingUninstall: $confirmingUninstall,
@@ -228,6 +249,25 @@ struct GameFooter: View {
         }
     }
 
+    /// The installed version, shown in a capsule beside an idle game only, never over progress or a launch.
+    private var installedVersion: String? {
+        guard launch == nil, state.activity == nil else { return nil }
+        switch state.status {
+        case .installed(let tag), .updateAvailable(let tag, _): return tag
+        default: return nil
+        }
+    }
+
+    private var playTime: PlayTimeSummary? {
+        guard let summary = model.playTime(for: game.id), summary.totalSeconds >= 60 else { return nil }
+        return summary
+    }
+
+    private var launchLogAvailable: Bool {
+        if case .failed(let failure) = launch, failure.hasLog, model.sessionLogsEnabled { return true }
+        return false
+    }
+
     /// The pre-download sits beside an installed game, never over another operation's progress.
     private var showsPreDownload: Bool {
         if case .working = state.activity { return false }
@@ -256,7 +296,12 @@ struct GameFooter: View {
         if case .working(let phase, _, _, _, _) = state.activity {
             switch phase {
             case .committing, .deleting, .cleaningUp: return String(localized: "Finishing up — this can't be paused")
-            default: return String(localized: "Keep MacGacha open — you can pause and resume any time")
+            default:
+                // A cancelled move is not resumed: the game simply stays where it was.
+                if model.gameMovePhase(for: game.id) != nil {
+                    return String(localized: "Keep MacGacha open — if you cancel, the game stays where it is")
+                }
+                return String(localized: "Keep MacGacha open — you can pause and resume any time")
             }
         }
         if let launchLine { return launchLine }
@@ -278,8 +323,8 @@ struct GameFooter: View {
         switch model.gameUpdateCheck[game.id] {
         case .checking: return String(localized: "Checking for updates…")
         case .upToDate:
-            if case .installed(let tag) = state.status {
-                return String(localized: "Version \(tag) · Up to date", comment: "Game status after a manual update check; the argument is the game version")
+            if case .installed = state.status {
+                return String(localized: "Up to date", comment: "Game status after a manual update check")
             }
         case .failed(let error):
             return String(localized: "Couldn't check for updates: \(error.userMessage)", comment: "Manual game update check failed; the argument is the reason")
@@ -288,13 +333,16 @@ struct GameFooter: View {
         switch state.status {
         case .unknown: return String(localized: "Checking for updates…")
         case .notInstalled: return String(localized: "Not installed")
-        case .installed(let tag): return String(localized: "Version \(tag) · Installed", comment: "Game status; the argument is the game version")
-        case .updateAvailable(let from, let to):
-            return String(localized: "Version \(from) · Version \(to) is available", comment: "Game status: installed version, then the newer one")
+        // The version capsule and the Play button already say it.
+        case .installed: return ""
+        case .updateAvailable(_, let to):
+            return String(localized: "Version \(to) is available", comment: "Game status; the argument is the newer game version")
         case .paused:
             return state.spaceShortage == nil ? String(localized: "Paused") : String(localized: "Paused — Not enough free disk space")
         case .uninstallPaused: return String(localized: "Uninstall didn't finish")
-        case .locationUnavailable: return String(localized: "Install location unavailable — connect the drive it's on")
+        case .locationUnavailable:
+            // The drive name comes from the saved path, so it is known while the drive is away.
+            return model.gameLocationHint(for: game.id) ?? String(localized: "Install location unavailable — connect the drive it's on")
         }
     }
 
@@ -533,16 +581,18 @@ struct PrimaryActionButton: View {
                 .accessibilityLabel(state.progressDetail.map { StatusText.joined(label, $0) } ?? label)
             }
             if canPause {
+                // Stopping a move cancels it rather than pausing, so the button says so.
+                let moving = model.gameMovePhase(for: game.id) != nil
                 Button {
                     model.pauseGame(game.id)
                 } label: {
-                    Image(systemName: "pause.fill")
+                    Image(systemName: moving ? "xmark" : "pause.fill")
                         .frame(width: 30, height: 30)
                 }
                 .buttonStyle(.glass)
                 .buttonBorderShape(.circle)
-                .help("Pause")
-                .accessibilityLabel("Pause")
+                .help(moving ? "Cancel Move" : "Pause")
+                .accessibilityLabel(moving ? "Cancel Move" : "Pause")
             }
         }
         .padding(.leading, 18)
@@ -635,7 +685,9 @@ struct PrimaryActionButton: View {
     private func progressLabel(at now: ContinuousClock.Instant) -> String {
         guard case .working(let phase, let fraction, _, let downloaded, _) = state.activity else { return "" }
         let localWork = (phase == .staging && downloaded == nil) || (phase == .checkingSpace && fraction != nil)
-        let label = localWork ? String(localized: "Installing…") : RuntimePhaseText.label(for: phase, fraction: fraction)
+        let label = if let move = model.gameMovePhase(for: game.id) { move.label }
+            else if localWork { String(localized: "Installing…") }
+            else { RuntimePhaseText.label(for: phase, fraction: fraction) }
         switch state.timing?.display(at: now) ?? .none {
         case .none:
             return label
@@ -667,6 +719,7 @@ struct GameMenu: View {
     @Binding var gameSheet: GameSheet?
     @Binding var confirmingUninstall: Bool
     @Binding var confirmingPreDownloadDeletion: Bool
+    @State private var choosingMoveFolder = false
 
     /// While waiting for approval only folder actions make sense; verify and voices would start new work.
     private var waitingForApproval: Bool {
@@ -687,8 +740,28 @@ struct GameMenu: View {
                     .disabled(model.gameUpdateCheck[game.id] == .checking)
                 Button("Verify Files", systemImage: "checkmark.shield") { model.verifyGame(game.id) }
                 Button("Voice Packs…", systemImage: "waveform") { gameSheet = .voices(game.id) }
+                if model.wishHistoryEnabled {
+                    Button("Export Wish History…", systemImage: "square.and.arrow.up") { gameSheet = .wishExport(game.id) }
+                        .disabled(!model.canExportWishHistory(game.id))
+                }
             }
-            if let folder = model.gameRecord(game.id)?.installPath {
+            // An active pre-download of this game doesn't hide Move: the model pauses and drains it first.
+            if isInstalled, !waitingForApproval, !isLive {
+                Button("Move…", systemImage: "folder.badge.gearshape") { choosingMoveFolder = true }
+                    .disabled(!model.canMoveGame(game.id))
+            }
+            // Read-only, so it stays available while the game runs or another game downloads.
+            if isInstalled, model.offersScreenshots(for: game.id) {
+                // Looked up when the menu opens: the game creates the folder with the first screenshot.
+                let folder = model.screenshotsURL(for: game.id)
+                Button(model.screenshotsMenuTitle, systemImage: "photo.on.rectangle") {
+                    if let folder { NSWorkspace.shared.open(folder) }
+                }
+                .disabled(folder == nil)
+                .help(folder == nil ? model.screenshotsHelp : "")
+            }
+            // Hidden while the drive is away: Finder can't reveal an unmounted folder.
+            if let folder = model.gameLocationURL(for: game.id) {
                 Button("Show in Finder", systemImage: "folder") {
                     NSWorkspace.shared.activateFileViewerSelecting([folder])
                 }
@@ -712,6 +785,13 @@ struct GameMenu: View {
         .foregroundStyle(.white)
         .help("More for \(game.name)")
         .accessibilityLabel("More for \(game.name)")
+        // The game goes into a folder with its usual name inside the chosen one.
+        .fileImporter(isPresented: $choosingMoveFolder, allowedContentTypes: [.folder]) { result in
+            guard case .success(let folder) = result else { return }
+            model.moveGame(game.id, to: folder)
+        }
+        .fileDialogMessage("Choose where to move \(game.name)")
+        .fileDialogConfirmationLabel("Move Here")
     }
 
     /// The game is launching, running or still being restored; its files must stay put.
@@ -767,6 +847,26 @@ enum TimeText {
         return String(localized: "\(text) left", comment: "Estimated time remaining, e.g. 12 min left")
     }
 
+    /// Total play time: hours and minutes under ten hours, whole hours after that.
+    static func duration(_ seconds: Double) -> String {
+        let minutes = Int64(max(0, seconds) / 60)
+        let units: Set<Duration.UnitsFormatStyle.Unit> = minutes >= 600 ? [.hours] : [.hours, .minutes]
+        return Duration.seconds(minutes * 60)
+            .formatted(.units(allowed: units, width: .abbreviated, maximumUnitCount: 2, fractionalPart: .hide(rounded: .down)))
+    }
+
+    static func played(_ seconds: Double) -> String {
+        String(localized: "Played \(duration(seconds))", comment: "Total play time, e.g. Played 42 hr")
+    }
+
+    /// The last session for the game menu, e.g. "Last played yesterday for 1 hr 20 min".
+    static func lastSession(_ summary: PlayTimeSummary) -> String {
+        let when = summary.lastPlayed.formatted(.relative(presentation: .named))
+        let length = Duration.seconds(Int64(max(60, summary.lastSessionSeconds) / 60) * 60)
+            .formatted(.units(allowed: [.hours, .minutes], width: .abbreviated))
+        return String(localized: "Last played \(when) for \(length)", comment: "Game menu; arguments are a relative date (yesterday) and a duration (1 hr 20 min)")
+    }
+
     /// A running clock, e.g. 1:05, so a phase without a percentage visibly moves.
     static func elapsed(_ duration: Duration) -> String {
         duration.formatted(.time(pattern: duration >= .seconds(3600) ? .hourMinuteSecond : .minuteSecond))
@@ -803,5 +903,25 @@ struct OtherRegionNote: View {
         .buttonStyle(.glass)
         .controlSize(.small)
         .foregroundStyle(.white)
+    }
+}
+
+/// A quiet fact above Play, such as the installed version or the total play time.
+private struct InfoCapsule: View {
+    let text: String
+    let systemImage: String?
+
+    var body: some View {
+        HStack(spacing: 6) {
+            if let systemImage { Image(systemName: systemImage) }
+            Text(verbatim: text)
+        }
+        .font(.callout)
+        .monospacedDigit()
+        .padding(.horizontal, 12)
+        .frame(height: 30)
+        .glassEffect(.regular, in: .capsule)
+        .foregroundStyle(.white)
+        .accessibilityElement(children: .ignore)
     }
 }

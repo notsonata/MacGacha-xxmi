@@ -113,6 +113,7 @@ final class AppModel {
 
     var region: Region {
         didSet {
+            if storageCleanupInProgress { region = oldValue; return }
             guard region != oldValue else { return }
             defaults?.set(region.rawValue, forKey: "region")
             updateArtReveal()
@@ -129,6 +130,15 @@ final class AppModel {
     var isGameOperationRunning: Bool { gameOperation != nil }
     private(set) var isRuntimeOperationRunning = false
     @ObservationIgnored let updater: any AppUpdating
+    var notificationAuthorization: GameNotificationAuthorization = .notDetermined
+    var notificationSelection: GameNotificationSelection?
+    @ObservationIgnored let notifications: any GameNotificationCenter
+    @ObservationIgnored let notificationHistory: any GameNotificationHistoryAccess
+    @ObservationIgnored let notificationIsFrontmost: @MainActor () -> Bool
+    @ObservationIgnored let notificationReveal: @MainActor () -> Void
+    @ObservationIgnored let notificationSettings: @MainActor () -> Void
+    @ObservationIgnored var notificationTask: Task<Void, Never>?
+    @ObservationIgnored var notificationActivationTask: Task<Void, Never>?
     private(set) var launcherRevealed = false
     private(set) var artCacheStates: [Region: ArtCacheState] = [:]
     var artCacheState: ArtCacheState { artCacheStates[region] ?? .notChecked }
@@ -204,12 +214,15 @@ final class AppModel {
     @ObservationIgnored let defaults: UserDefaults?
     @ObservationIgnored let purgeableSpace: any PurgeableSpaceProbe
     @ObservationIgnored let gameServices: any GameServices
+    var gameLocationPauseReasons: [String: LauncherError] = [:]
+    @ObservationIgnored var volumeEventTask: Task<Void, Never>?
+    @ObservationIgnored private var volumeObservation: (any Sendable)?
     @ObservationIgnored var gameTask: Task<Void, Never>?
     @ObservationIgnored var gameStartupTask: Task<Void, Never>?
     @ObservationIgnored var gameActivationTask: Task<Void, Never>?
-    @ObservationIgnored var gameVolumeTask: Task<Void, Never>?
-    @ObservationIgnored var gameLocationRefreshInFlight = false
-    @ObservationIgnored var gameLocationRefreshPending = false
+    var prefixResetGame: String?
+    @ObservationIgnored let prefixResetter: any WinePrefixResetting
+    var gameMoveRecoveryReservation = false
     var gameOperation: GameOperationToken?
     private(set) var languageRestart: UUID?
     func setLanguageRestart(_ value: UUID?) { languageRestart = value }
@@ -232,7 +245,6 @@ final class AppModel {
     private(set) var rosettaInstallInProgress = false
     @ObservationIgnored let rosettaProbe: any RosettaProbing
     @ObservationIgnored let activationCenter: NotificationCenter
-    @ObservationIgnored let volumeCenter: NotificationCenter
     @ObservationIgnored let rosettaClock: any Clock<Duration>
     @ObservationIgnored let rosettaPollInterval: Duration
     @ObservationIgnored let rosettaPollTimeout: Duration
@@ -268,6 +280,12 @@ final class AppModel {
     var dependencyAutoUpdates: [String: DependencyAutoUpdateState] = [:]
     var runtimeUpdatesAwaitingConsent: Set<String> = []
     var dependencyAutoUpdateReservation = false
+    var storage: StorageSnapshot?
+    var isRefreshingStorage = false
+    var storageCleanupInProgress = false
+    @ObservationIgnored var storageRefreshGeneration = UUID()
+    @ObservationIgnored var storageService: any StorageServicing
+    @ObservationIgnored let storageCacheDirectory: URL?
     var dependencyHasRetainedVersions = false
     @ObservationIgnored var dependencyAutoUpdateTask: Task<Void, Never>?
     @ObservationIgnored var dependencyAutoUpdateGeneration = UUID()
@@ -277,13 +295,24 @@ final class AppModel {
     @ObservationIgnored var dependencyUpdateLog: EventLog?
     var launchSettingsRevisions: [String: UUID] = [:]
     var launchStates: [String: LaunchUIState] = [:]
+    var playTimeSummaries: [String: PlayTimeSummary] = [:]
+    @ObservationIgnored var playTimeStartupTask: Task<Void, Never>?
+    @ObservationIgnored var playTimeRefreshRevision = UUID()
     var launchNotes: [String: LaunchNote] = [:]
     @ObservationIgnored var launchFailures: [String: LaunchFailureInfo] = [:]
     var recoveryNotices: [RecoveryNotice] = []
     var durableLaunchSettings: [String: LaunchSettings] = [:]
     var durableGlobalLaunchSettings = GlobalLaunchSettings()
     var launchSettingsCache: [String: LaunchSettings] = [:]
-    var globalLaunchSettings = GlobalLaunchSettings()
+    var globalLaunchSettings = GlobalLaunchSettings() {
+        didSet { gameServices.setDownloadSpeedLimit(globalLaunchSettings.downloadSpeedLimit) }
+    }
+    var wishHistoryExportingGame: String?
+    var wishHistoryProgress: WishHistoryProgress?
+    var wishHistoryFailure: LauncherError?
+    @ObservationIgnored let wishHistoryExporter: any WishHistoryExporting
+    @ObservationIgnored var wishHistoryTask: Task<WishHistoryExport, any Error>?
+    @ObservationIgnored var wishHistoryGeneration: UUID?
     var knownEndedLaunchGames: Set<String> = []
     var liveLaunchGames: Set<String> = []
     /// Includes preparation and file-only recovery, even after verified game end.
@@ -316,11 +345,12 @@ final class AppModel {
         artServices: [Region: any GameArtProviding] = [:],
         eventsServices: [Region: any GameEventsProviding] = [:],
         gameServices: any GameServices = PreviewGameServices(),
+        storageService: (any StorageServicing)? = nil, storageCacheDirectory: URL? = nil,
+        volumeEvents: any VolumeEventSource = WorkspaceVolumeEventSource(),
         rosettaProbe: any RosettaProbing = UnknownRosettaProbe(),
         displayProbe: any DisplayProbe = FixedDisplayProbe(),
         displayNames: @escaping @MainActor @Sendable () -> [String: String] = { [:] },
         activationCenter: NotificationCenter = .default,
-        volumeCenter: NotificationCenter = NSWorkspace.shared.notificationCenter,
         rosettaClock: any Clock<Duration> = ContinuousClock(),
         rosettaPollInterval: Duration = .seconds(2), rosettaPollTimeout: Duration = .seconds(300),
         rosettaPrompt: @escaping @MainActor @Sendable () async throws -> Void = { try await RosettaPrompt.open() },
@@ -330,27 +360,43 @@ final class AppModel {
         modSupportStore: ModSupportStore? = nil,
         modSupportStores: [String: ModSupportStore]? = nil,
         launchPreferences: (any LaunchPreferencesPersistence)? = nil,
+        wishHistoryExporter: any WishHistoryExporting = WishHistoryExporter(),
         launchWindows: LaunchWindowCoordinator = LaunchWindowCoordinator(),
         launchSleep: @escaping @Sendable () async throws -> Void = { try await ContinuousClock().sleep(for: .milliseconds(500)) },
         recoverySleep: @escaping @Sendable (Duration) async throws -> Void = { try await ContinuousClock().sleep(for: $0) },
+        notifications: any GameNotificationCenter = EmptyGameNotificationCenter(),
+        notificationHistory: (any GameNotificationHistoryAccess)? = nil,
+        notificationIsFrontmost: @escaping @MainActor () -> Bool = { NSApp?.isActive ?? true },
+        notificationReveal: @escaping @MainActor () -> Void = {},
+        notificationSettings: @escaping @MainActor () -> Void = {},
         now: @escaping @Sendable () -> ContinuousClock.Instant = { .now },
         eventsNow: @escaping @Sendable () -> Date = Date.init,
         eventsSleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
         updater: any AppUpdating = InertAppUpdater(), artClock: any Clock<Duration> = ContinuousClock(),
         relaunch: @escaping @MainActor ([String]) async throws -> Void = { _ in },
         terminateAfterLanguageRestart: @escaping @MainActor () -> Void = {},
-        launchArguments: [String] = ProcessInfo.processInfo.arguments) {
+        launchArguments: [String] = ProcessInfo.processInfo.arguments,
+        prefixResetter: (any WinePrefixResetting)? = nil) {
+        self.wishHistoryExporter = wishHistoryExporter
+        self.storageService = storageService ?? StorageInventory(paths: paths)
+        self.storageCacheDirectory = storageCacheDirectory
+        self.prefixResetter = prefixResetter ?? WinePrefixResetter(paths: paths)
         self.relaunch = relaunch; self.terminateAfterLanguageRestart = terminateAfterLanguageRestart
         self.launchArguments = launchArguments
         self.artClock = artClock
         self.updater = updater
+        self.notifications = notifications
+        self.notificationHistory = notificationHistory ?? LiveGameNotificationHistory(store: GameNotificationHistory(paths: paths))
+        self.notificationIsFrontmost = notificationIsFrontmost
+        self.notificationReveal = notificationReveal
+        self.notificationSettings = notificationSettings
         self.eventsServices = eventsServices
         self.eventsNow = eventsNow; self.eventsSleep = eventsSleep
         self.eventsSnapshots = eventsServices.mapValues { $0.cached() }
         self.displayProbe = displayProbe; self.displayNames = displayNames
         self.launchPreferences = launchPreferences ?? LiveLaunchPreferencesPersistence(paths: paths)
         self.rosettaProbe = rosettaProbe; self.rosettaClock = rosettaClock
-        self.activationCenter = activationCenter; self.volumeCenter = volumeCenter
+        self.activationCenter = activationCenter
         self.rosettaPollInterval = rosettaPollInterval; self.rosettaPollTimeout = rosettaPollTimeout; self.rosettaPrompt = rosettaPrompt
         self.recoverySleep = recoverySleep
         self.launchServices = launchServices; self.launchWindows = launchWindows; self.launchSleep = launchSleep
@@ -378,11 +424,12 @@ final class AppModel {
             ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Games/MacGacha", isDirectory: true)
         rebuildRows()
         revalidateGameEvents()
+        configureNotifications()
         observeGameActivation()
-        observeVolumeChanges()
         observeEventsWindowActivation()
         refreshConnectedDisplays()
         screenChangeObservation = ScreenChangeObservation(center: activationCenter, model: self)
+        volumeObservation = volumeEvents.observe { [weak self] event in self?.receiveVolumeEvent(event) }
     }
 
     func setGameState(_ id: String, _ state: GameState) {
@@ -472,9 +519,13 @@ final class AppModel {
         })
         return AppModel(paths: paths, services: runtimeServices, catalogAccess: catalog,
             artServices: art, eventsServices: events, gameServices: LiveGameServices(paths: paths, log: log, guard: launch),
+            storageCacheDirectory: gameArtCacheDirectory(in: caches, bundleIdentifier: Bundle.main.bundleIdentifier).deletingLastPathComponent(),
             rosettaProbe: SystemRosettaProbe(), displayProbe: SystemDisplayProbe(),
             displayNames: { ScreenDisplayNames.current() }, launchServices: launch, modSupportStore: modSupport,
-            modSupportStores: modSupportStores, updater: SparkleUpdaterService(), relaunch: { arguments in
+            modSupportStores: modSupportStores, wishHistoryExporter: WishHistoryExporter(log: log),
+            notifications: SystemGameNotificationCenter(), notificationIsFrontmost: { NSApp.isActive },
+            notificationReveal: { SystemGameNotificationCenter.revealLauncher() },
+            notificationSettings: { SystemGameNotificationCenter.openSettings() }, updater: SparkleUpdaterService(), relaunch: { arguments in
                 let configuration = NSWorkspace.OpenConfiguration()
                 configuration.createsNewApplicationInstance = true; configuration.arguments = arguments
                 _ = try await NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: configuration)
@@ -522,8 +573,10 @@ final class AppModel {
         for task in artHydrationTasks.values { task.cancel() }
         artStartupTask?.cancel(); artRevealTask?.cancel()
         for task in eventsTasks.values { task.cancel() }
+        notificationTask?.cancel(); notificationActivationTask?.cancel()
         eventsHydrationTask?.cancel(); eventsExpiryTask?.cancel(); eventsWindowTask?.cancel()
-        gameTask?.cancel(); gameStartupTask?.cancel(); gameActivationTask?.cancel(); gameVolumeTask?.cancel()
+        volumeEventTask?.cancel()
+        gameTask?.cancel(); gameStartupTask?.cancel(); gameActivationTask?.cancel()
         for task in modSupportTasks.values { task.cancel() }
     }
 
@@ -590,11 +643,20 @@ final class AppModel {
                 let target = try runtimeVersionTarget(id, pinned: false)
                 captureRuntimeInstallContext(id, manifest: target.catalog.manifest)
                 guard let context = runtimeInstallContexts[id], context.component.kind == .d3dmetal else { return }
+                let helpers = target.selections.helpers.filter { runtimeCatalog?.selections.helpers[$0.key]?.id != $0.value.id }
+                    .values.map { $0.id.rawValue }.sorted()
+                var items: [RuntimeSetupPlan.Item] = [.init(id: id, name: context.bundle?.displayName ?? Self.kindName(context.component.kind), size: nil)]
+                for helperID in helpers {
+                    captureRuntimeInstallContext(helperID, manifest: target.catalog.manifest)
+                    if case .installed = runtimeSetupItemState(helperID) { continue }
+                    guard let helper = runtimeInstallContexts[helperID]?.component else { throw LauncherError.io("Unknown runtime installation") }
+                    items.append(.init(id: helperID, name: Self.kindName(helper.kind), size: helper.size))
+                }
                 let key = "catalog-" + id
                 runtimeCatalogMutationID = id; catalogSelectionGeneration = UUID()
                 catalogActivationTargets[key] = target
                 runtimeSetupChains[key] = RuntimeSetupChain(plan: RuntimeSetupPlan(gameID: key,
-                    items: [.init(id: id, name: context.bundle?.displayName ?? Self.kindName(context.component.kind), size: nil)], needsAppleTerms: true), attempted: true)
+                    items: items, needsAppleTerms: true), attempted: true)
             } catch { show(error); return }
         }
         request(id, mode: .importGPTK)
@@ -976,10 +1038,20 @@ final class AppModel {
         return .idle
     }
 
+    func showMoveVolumeUnavailable(originalFolder: Bool) {
+        if originalFolder {
+            lastError = String(localized: "A drive was disconnected, so the move stopped. The game stays in its original folder. Reconnect the drive and move it again.")
+        } else {
+            lastError = String(localized: "A drive was disconnected before the move finished cleaning up. Reconnect the drive to finish cleanup.")
+        }
+    }
+
     func show(_ error: any Error) {
         let error = launcherError(error)
         if error != .cancelled { lastError = error.userMessage }
     }
+    /// A specific, already localized explanation where no LauncherError fits.
+    func show(message: String) { lastError = message }
     private static func id(_ component: InstalledComponent) -> String { "\(component.kind.idPrefix)-\(component.version)" }
     static func kindName(_ kind: ComponentKind) -> String {
         switch kind {

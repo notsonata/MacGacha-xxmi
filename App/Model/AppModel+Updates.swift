@@ -33,7 +33,15 @@ import LauncherCore
     }
 
     func canBeginGameOrRuntimeOperation(allowingCatalogID: String? = nil) -> Bool {
-        guard runtimeCatalogMutationID == nil || runtimeCatalogMutationID == allowingCatalogID else { return false }
+        guard !storageCleanupInProgress, prefixResetGame == nil else { return false }
+        guard !gameMoveRecoveryReservation else { return false }
+        let capturedSetupItem = allowingCatalogID.map { id in
+            catalogActivationTargets.keys.contains { key in
+                guard let chain = runtimeSetupChains[key] else { return false }
+                return chain.plan.items[chain.index].id == id
+            }
+        } ?? false
+        guard runtimeCatalogMutationID == nil || runtimeCatalogMutationID == allowingCatalogID || capturedSetupItem else { return false }
         guard languageRestart == nil, !updater.isInstallingUpdate else {
             show(LauncherError.busy("Application update is installing"))
             return false
@@ -43,7 +51,7 @@ import LauncherCore
 
     /// Reservations outlive UI progress and keep draining or recovering work safe.
     var isBusyForUpdates: Bool {
-        dependencyAutoUpdateReservation || runtimeCatalogMutationID != nil || languageRestart != nil || isStarting || launchSlotOwner != nil || liveSessionGameName != nil ||
+        storageCleanupInProgress || prefixResetGame != nil || dependencyAutoUpdateReservation || runtimeCatalogMutationID != nil || languageRestart != nil || gameMoveRecoveryReservation || isStarting || launchSlotOwner != nil || liveSessionGameName != nil ||
             launchStates.values.contains { if case .recoveryNeeded = $0 { true } else { false } } ||
             isGameOperationRunning || isRuntimeOperationRunning || isModSupportBusy || consentRequest != nil || importState != nil ||
             runtimeSetupProgress.values.contains { if case .installing = $0 { true } else { false } }

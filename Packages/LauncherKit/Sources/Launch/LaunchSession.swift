@@ -35,6 +35,20 @@ public struct LaunchSession: Codable, Equatable, Sendable {
     public var endLogged: Bool?
     /// Retains startup grace when inspection uncertainty changes state to pending.
     public var startupPending: Bool?
+    /// Wall-clock dates for last played and bounded recovery estimates.
+    public var runningSince: Date?
+    public var verifiedEndedAt: Date?
+    public var playTimeEndRecovered: Bool?
+    /// CLOCK_MONOTONIC_RAW seconds at the first game observation, scoped to bootSessionUUID.
+    public var runningMonotonicSeconds: Double?
+    /// Last positive process observation, persisted with the existing observation write.
+    public var lastLifeAt: Date?
+    public var lastLifeMonotonicSeconds: Double?
+    /// One-time recovery evidence, including an explicit absence, before log mutation.
+    public var sessionLogEvidenceCaptured: Bool?
+    public var sessionLogEvidenceAt: Date?
+    /// Frozen monotonic duration at verified end, retained for accounting retries.
+    public var supervisedPlaySeconds: Double?
     /// Durable qualification for automatic runtime cleanup, absent in legacy journals.
     public var reachedRunning: Bool?
     public var reachedReady: Bool?
@@ -46,6 +60,10 @@ public struct LaunchSession: Codable, Equatable, Sendable {
     /// Additive injection snapshot for diagnostics and recovery. nil decodes
     /// journals written before opt-in injection existed.
     public var injection: LaunchInjectionConfiguration?
+    /// Additive ownership of ZZZ native-proxy files placed in this session's
+    /// prefix system32. nil decodes older journals and is never encoded, so
+    /// hook-runner and Mods OFF journals keep their existing bytes.
+    public var nativeProxy: NativeProxyRecord?
     public let gameExecutable: SafeRelativePath?
     public let createdAt: Date
 
@@ -57,7 +75,8 @@ public struct LaunchSession: Codable, Equatable, Sendable {
         bootSessionUUID: String? = nil, sessionStartTime: UInt64? = nil, endLogged: Bool? = nil,
         recoveryLocation: LaunchRecoveryLocation? = nil, startupPending: Bool? = nil,
         reachedRunning: Bool? = nil, reachedReady: Bool? = nil, confirmedRunningSeconds: Double? = nil,
-        injection: LaunchInjectionConfiguration? = nil) {
+        runningSince: Date? = nil, verifiedEndedAt: Date? = nil, playTimeEndRecovered: Bool? = nil, supervisedPlaySeconds: Double? = nil, runningMonotonicSeconds: Double? = nil, lastLifeAt: Date? = nil, lastLifeMonotonicSeconds: Double? = nil, sessionLogEvidenceCaptured: Bool? = nil, sessionLogEvidenceAt: Date? = nil,
+        injection: LaunchInjectionConfiguration? = nil, nativeProxy: NativeProxyRecord? = nil) {
         self.sessionID = sessionID; self.game = game; self.installRoot = installRoot; self.installIdentity = installIdentity
         self.prefix = prefix; self.bundleID = bundleID; self.runtimeDigest = runtimeDigest; self.wineBinary = wineBinary
         self.wineserver = wineserver; self.componentIDs = componentIDs; self.recipeVersion = recipeVersion
@@ -70,10 +89,26 @@ public struct LaunchSession: Codable, Equatable, Sendable {
         self.startupPending = startupPending
         self.reachedRunning = reachedRunning; self.reachedReady = reachedReady
         self.confirmedRunningSeconds = confirmedRunningSeconds
+        self.runningSince = runningSince; self.verifiedEndedAt = verifiedEndedAt
+        self.playTimeEndRecovered = playTimeEndRecovered
+        self.supervisedPlaySeconds = supervisedPlaySeconds
+        self.runningMonotonicSeconds = runningMonotonicSeconds
+        self.lastLifeAt = lastLifeAt; self.lastLifeMonotonicSeconds = lastLifeMonotonicSeconds
+        self.sessionLogEvidenceCaptured = sessionLogEvidenceCaptured; self.sessionLogEvidenceAt = sessionLogEvidenceAt
         self.injection = injection
+        self.nativeProxy = nativeProxy
     }
 
     func validate() throws {
+        guard [runningSince, verifiedEndedAt, lastLifeAt, sessionLogEvidenceAt].compactMap({ $0 }).allSatisfy({ $0.timeIntervalSinceReferenceDate.isFinite }) else {
+            throw LauncherError.journalCorrupt("Invalid play time interval")
+        }
+        guard [runningMonotonicSeconds, lastLifeMonotonicSeconds].compactMap({ $0 }).allSatisfy({ $0.isFinite && $0 >= 0 && bootSessionUUID != nil }) else {
+            throw LauncherError.journalCorrupt("Invalid monotonic play time start")
+        }
+        guard supervisedPlaySeconds.map({ $0.isFinite && $0 >= 0 }) ?? true else {
+            throw LauncherError.journalCorrupt("Invalid supervised play time")
+        }
         guard confirmedRunningSeconds.map({ $0.isFinite && $0 >= 0 && $0 <= 31_536_000 }) ?? true else {
             throw LauncherError.journalCorrupt("Invalid running qualification")
         }
@@ -91,6 +126,16 @@ public struct LaunchSession: Codable, Equatable, Sendable {
             if let family = GameDefinition.find(game)?.family,
                 injection.resolvedTargetExecutable != LaunchInjection.targetExecutable(for: family) {
                 throw LauncherError.journalCorrupt("Invalid injection target identity")
+            }
+        }
+        if let nativeProxy {
+            // The record is trusted only as this session's own native snapshot
+            // placement: same prefix, same session, same Global ZZZ target.
+            try nativeProxy.validate(prefix: prefix, sessionID: sessionID)
+            guard game == "zzz", let injection, injection.resolvedLoading == .nativeProxy,
+                injection.gameID == "zzz", injection.resolvedTargetExecutable == "ZenlessZoneZero.exe",
+                injection.sessionDirectory.standardizedFileURL.path == nativeProxy.sessionDirectory.path else {
+                throw LauncherError.journalCorrupt("Invalid native proxy session identity")
             }
         }
         guard recipeVersion > 0, runtimeDigest.algorithm == .sha256, componentIDs.count <= 64,

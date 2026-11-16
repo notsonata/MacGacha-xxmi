@@ -57,7 +57,7 @@ let package = Package(
         .testTarget(name: "HoYoPlayAPITests", dependencies: ["HoYoPlayAPI", "TestSupport"], resources: [.copy("Fixtures/CN"), .copy("Fixtures/Events")]),
         .testTarget(name: "SophonTests", dependencies: ["Sophon", "TestSupport", "CHDiffPatch"], resources: [.copy("Fixtures/CN"), .copy("Fixtures/HDiffUpstream")]),
         .testTarget(name: "GameLibraryTests", dependencies: ["GameLibrary", "TestSupport", "CrashHarness"],
-            resources: [.copy("Fixtures/Adopt")]),
+            resources: [.copy("Fixtures/Adopt"), .copy("Fixtures/WishHistory")]),
         .testTarget(name: "ModSupportTests", dependencies: ["ModSupport", "LauncherCore", "RuntimeManager"]),
         .testTarget(name: "LaunchTests", dependencies: ["Launch", "TestSupport", "CrashHarness"]),
         .testTarget(name: "BackdropVideoTests", dependencies: ["BackdropVideo", "TestSupport"], resources: [.copy("Fixtures")]),

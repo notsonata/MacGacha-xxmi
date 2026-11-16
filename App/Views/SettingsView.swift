@@ -71,6 +71,52 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
             Section {
+                Picker("Download speed", selection: Binding(
+                    get: { model.downloadSpeedLimit },
+                    set: { value in
+                        do { try model.setDownloadSpeedLimit(value) } catch { model.show(error) }
+                    }
+                )) {
+                    ForEach(AppModel.downloadSpeedLimitOptions, id: \.self) { limit in
+                        Text(Self.speedLimitName(limit)).tag(limit)
+                    }
+                }
+            } footer: {
+                Text("Limits game downloads, updates and pre-downloads, so other apps on your network stay fast. Changes apply to running downloads right away.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Section {
+                Toggle("Notifications", isOn: Binding(
+                    get: { model.notificationsEnabled },
+                    set: { model.notificationsEnabled = $0 }
+                ))
+                if model.notificationsEnabled, model.notificationAuthorization == .denied {
+                    LabeledContent {
+                        Button("Open System Settings") { model.openNotificationSettings() }
+                    } label: {
+                        Text("Notifications are turned off for MacGacha in System Settings.")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            } footer: {
+                Text("Tells you when a download or update finishes or needs attention, and when a new game version or pre-download appears. Only while MacGacha is in the background.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Section {
+                Toggle("Wish history export", isOn: Binding(
+                    get: { model.wishHistoryEnabled },
+                    set: { model.wishHistoryEnabled = $0 }
+                ))
+            } footer: {
+                Text(model.wishHistoryEnabled
+                    ? model.wishHistoryExplanation
+                    : String(localized: "Adds Export Wish History… to each game's menu. While off, MacGacha doesn't read the history link or contact HoYoverse for it."))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Section {
                 Toggle("Animated backgrounds", isOn: Binding(
                     get: { animatedBackgrounds },
                     set: { animatedBackgrounds = $0; animatedChosen = true }
@@ -126,11 +172,22 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
+        .task { await model.refreshNotificationAuthorization() }
+        // Coming back from System Settings may have changed the permission.
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            Task { await model.refreshNotificationAuthorization() }
+        }
         .frame(width: 520)
         .fixedSize(horizontal: false, vertical: true)
         .fileImporter(isPresented: $choosing, allowedContentTypes: [.folder]) { result in
             if case .success(let url) = result { model.setInstallRoot(url) }
         }
+    }
+
+    private static func speedLimitName(_ limit: Int64?) -> String {
+        guard let limit else { return String(localized: "Unlimited", comment: "Download speed limit: no limit") }
+        let rate = ByteCountFormatter.string(fromByteCount: limit, countStyle: .decimal)
+        return String(localized: "\(rate)/s", comment: "Download speed, e.g. 47 MB/s")
     }
 }
 

@@ -167,6 +167,18 @@ public struct SessionLog: Sendable {
         return log
     }
 
+    /// Read metadata from the owned inode before recovery caps or appends to it.
+    /// No log bytes are read and no path outside the app's pinned Logs is accepted.
+    package static func lastModificationDate(paths: AppPaths, game: String, url: URL) throws -> Date? {
+        guard url.deletingLastPathComponent().standardizedFileURL == paths.logs.standardizedFileURL,
+            parseName(url.lastPathComponent)?.game == game,
+            let fs = try ContainedFileSystem(root: paths.root).pinDirectoryIfPresent(at: SafeRelativePath("Logs")) else { return nil }
+        let path = try SafeRelativePath(url.lastPathComponent)
+        guard let record = try readOwnership(fs, path),
+            let file = try fs.openOwnedFile(at: path, matching: record.identity) else { return nil }
+        return try file.modificationDate()
+    }
+
     private static func sidecar(_ path: SafeRelativePath) throws -> SafeRelativePath { try SafeRelativePath(path.description + ".macgacha-owner.json") }
     private static func readOwnership(_ fs: ContainedFileSystem, _ path: SafeRelativePath) throws -> Ownership? {
         do {
@@ -188,4 +200,14 @@ public struct SessionLog: Sendable {
         LaunchLogFiles.parseName(name)
     }
     package static func precedes(_ lhs: String, _ rhs: String) -> Bool { LaunchLogFiles.precedes(lhs, rhs) }
+}
+
+extension SessionLog {
+package static func removeOldStorageLog(fs: ContainedFileSystem, game: String, path: SafeRelativePath) throws {
+    guard try matchingLogs(fs: fs, game: game).dropFirst().contains(path),
+        let record = try readOwnership(fs, path) else { throw LauncherError.busy("Session log is not obsolete") }
+    if try fs.removeOwnedFile(at: path, matching: record.identity) {
+        _ = try fs.removeOwnedFile(at: sidecar(path), matching: record.sidecarIdentity)
+    } else { throw LauncherError.busy("Session log changed") }
+}
 }

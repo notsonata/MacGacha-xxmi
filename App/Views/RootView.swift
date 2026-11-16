@@ -6,7 +6,7 @@ import LauncherCore
 import SwiftUI
 
 enum Panel: String, Identifiable {
-    case dependencies, diagnostics, xxmi
+    case dependencies, storage, diagnostics, xxmi
     var id: Self { self }
 }
 
@@ -89,7 +89,8 @@ struct RootView: View {
                     .padding(.bottom, 12)
                     .frame(maxHeight: .infinity)
                 GameFooter(game: game, art: model.gameArt[game.id], highlights: shownSlide?.highlights,
-                    images: images, panel: $panel, gameSheet: $gameSheet, animated: animated)
+                    images: images, panel: $panel, gameSheet: $gameSheet, animated: animated,
+                    slideHasVideo: shownSlide?.video != nil)
                     // A fresh footer per game, so a confirmation opened for one game can't act on another.
                     .id(game.id)
                     .padding(24)
@@ -129,6 +130,8 @@ struct RootView: View {
                 VoicePacksSheet(game: Self.game(id))
             case .settings(let id):
                 GameSettingsSheet(game: Self.game(id))
+            case .wishExport(let id):
+                WishExportSheet(game: Self.game(id))
             case .setup(let id):
                 RuntimeSetupSheet(game: Self.game(id)) { panel = .dependencies }
             case .rosetta(let id):
@@ -153,6 +156,16 @@ struct RootView: View {
         }
         // A sheet belongs to one game; once its region is hidden it must not act on it.
         .onChange(of: model.region) { gameSheet = nil }
+        // Clicking a notification selects its game. The model has already switched the region.
+        // A click that launched the app arrives before this view exists, so it is read on appear too.
+        .onChange(of: model.notificationSelection, initial: true) { _, selection in
+            guard let selection else { return }
+            panel = nil
+            gameSheet = nil
+            selectedID = selection.gameID
+            // Handled once, so reopening the window later doesn't jump back to it.
+            model.notificationSelection = nil
+        }
         #if DEBUG
         .onAppear(perform: applyDebugLaunchArguments)
         #endif
@@ -177,6 +190,7 @@ struct RootView: View {
         case "settings": gameSheet = .settings(selectedID)
         case "setup": gameSheet = .setup(selectedID)
         case "rosetta": gameSheet = .rosetta(selectedID)
+        case "wishExport": gameSheet = .wishExport(selectedID)
         default: break
         }
     }
@@ -224,6 +238,7 @@ struct RootView: View {
 
 /// Dependencies and Diagnostics open over the art as sheets, so the launcher stays one window.
 private struct PanelSheet: View {
+    @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     let panel: Panel
     let selectedID: String
@@ -233,12 +248,18 @@ private struct PanelSheet: View {
             Group {
                 switch panel {
                 case .dependencies: DependenciesView()
+                case .storage: StorageView()
                 case .diagnostics: DiagnosticsView()
                 case .xxmi: XXMIPanel(gameID: selectedID)
                 }
             }
             .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
+                // One group keeps Apply immediately before Done.
+                ToolbarItemGroup(placement: .confirmationAction) {
+                    if panel == .xxmi && model.canApplyModsToRunningGame(gameID: selectedID) {
+                        Button("Apply Mods to Running Game") { model.applyModsToRunningGame(gameID: selectedID) }
+                            .disabled(model.isModSupportBusy(for: selectedID))
+                    }
                     Button("Done") { dismiss() }
                 }
             }
@@ -246,7 +267,7 @@ private struct PanelSheet: View {
         .modifier(RuntimeFlowSheets(active: true))
         .frame(minWidth: panel == .xxmi ? 760 : 620, idealWidth: panel == .xxmi ? 820 : 680,
             minHeight: panel == .xxmi ? 520 : 320,
-            idealHeight: panel == .xxmi ? 620 : panel == .dependencies ? 560 : 380)
+            idealHeight: panel == .xxmi ? 620 : panel == .diagnostics ? 380 : 560)
     }
 }
 

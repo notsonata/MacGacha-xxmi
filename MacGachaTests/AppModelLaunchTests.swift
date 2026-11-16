@@ -14,6 +14,35 @@ import RuntimeManager
 
 @Suite(.serialized) @MainActor
 struct AppModelLaunchTests {
+    @Test(arguments: GameDefinition.all.map(\.id)) func metalHUDPersistsOnlyForItsEdition(game: String) async throws {
+        let fixture = try LaunchModelFixture(); defer { fixture.remove() }
+        let model = fixture.model
+        await model.reattachOnStart()
+        #expect(!model.metalHUD(for: game))
+        var otherSettings = model.launchSettings(for: game)
+        otherSettings.backend = .dxmt; otherSettings.retina = true
+        otherSettings.metalHUDContents = .custom
+        otherSettings.metalHUDElements = [.thermal, .fps, .memory]
+        otherSettings.metalHUDPosition = .bottomLeft
+        otherSettings.metalHUDSize = .large
+        try model.saveLaunchSettings(otherSettings, for: game)
+        try model.setMetalHUD(true, for: game)
+        #expect(model.metalHUD(for: game))
+        try await model.flushLaunchSettings()
+        let next = fixture.makeModel()
+        await next.reattachOnStart()
+        var expected = otherSettings; expected.metalHUD = true
+        #expect(next.launchSettings(for: game) == expected)
+        for other in GameDefinition.all where other.id != game {
+            #expect(next.launchSettings(for: other.id) == .defaults(for: other.id))
+        }
+        try next.setMetalHUD(false, for: game)
+        try await next.flushLaunchSettings()
+        #expect(!next.metalHUD(for: game))
+        let saved = try await BlockingIO.run { try LaunchSettingsStore(paths: fixture.paths).load(game) }
+        #expect(saved == otherSettings)
+    }
+
     @Test(arguments: ["starrail", "starrail-cn"]) func starRailUnlockTargetIsValidatedBeforeSaving(game: String) throws {
         let fixture = try LaunchModelFixture(); defer { fixture.remove() }
         let original = fixture.model.launchSettings(for: game)
@@ -193,7 +222,8 @@ struct AppModelLaunchTests {
 
     @Test func missingCNWineFixBlocksPlayAndClearsAfterInstallation() async throws {
         let fixture = try LaunchModelFixture(); defer { fixture.remove() }
-        let manifest = try await BundledRuntimeManifest.load()
+        let resource = try #require(Bundle(for: LaunchModelResources.self).url(forResource: "runtime-catalog-r3", withExtension: "json"))
+        let manifest = try JSONDecoder().decode(RuntimeCatalog.self, from: Data(contentsOf: resource)).manifest
         let bundle = try #require(manifest.defaultBundle(for: .d3dmetal))
         let fix = try #require(manifest.components.first { $0.id.rawValue == Crypt32Fix.componentID })
         let runtimes = PreviewRuntimeServices()
@@ -211,6 +241,25 @@ struct AppModelLaunchTests {
         #expect(!model.missingComponents(for: "zzz-cn"))
         #expect(PrimaryAction.resolve(GameState(status: .installed(tag: "1")), runtimesReady: true,
             missingComponents: model.missingComponents(for: "zzz-cn")) == .play)
+        try await model.flushLaunchSettings()
+    }
+
+    @Test(arguments: ["genshin-cn", "zzz-cn"])
+    func currentCNWineAllowsPlayWithoutLegacyWineFix(game: String) async throws {
+        let fixture = try LaunchModelFixture(); defer { fixture.remove() }
+        let manifest = try await BundledRuntimeManifest.load()
+        let bundle = try #require(manifest.defaultBundle(for: .d3dmetal))
+        let runtimes = PreviewRuntimeServices()
+        for try await _ in runtimes.install(bundle, manifest: manifest, from: nil) {}
+        let model = AppModel(paths: fixture.paths, manifest: manifest, services: runtimes, defaults: nil, launchServices: fixture.services)
+        await model.reattachOnStart()
+        await model.refreshRuntimes()
+        var settings = model.launchSettings(for: game); settings.compatibilityPatches = false
+        try model.saveLaunchSettings(settings, for: game)
+        #expect(!model.installed.contains { $0.kind == .crypt32Fix })
+        #expect(!model.missingComponents(for: game))
+        #expect(PrimaryAction.resolve(GameState(status: .installed(tag: "1")), runtimesReady: true,
+            missingComponents: model.missingComponents(for: game)) == .play)
         try await model.flushLaunchSettings()
     }
 
@@ -355,6 +404,8 @@ struct AppModelLaunchTests {
         #expect(fixture.model.launchSettings(for: "zzz") == .defaults(for: "zzz"))
     }
 }
+
+private final class LaunchModelResources {}
 
 @MainActor private struct LaunchModelFixture {
     let paths: AppPaths

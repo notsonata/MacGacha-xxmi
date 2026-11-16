@@ -476,12 +476,25 @@ import TestSupport
         try await f.assertOriginalRestored()
     }
 
-    @Test func reattachUsesSnapshotNotSettings() async throws {
+    @Test(arguments: [false, true]) func reattachUsesSnapshotNotSettings(metalHUD: Bool) async throws {
         let f = try await ManagerFixture.make(), manager = f.manager()
-        _ = try await f.saveSnapshot(state: .spawning, processes: [f.gameProcess.identity], backend: .dxmt, processGroupIDs: [54321])
-        try await BlockingIO.run { try LaunchSettingsStore(paths: f.paths).save(.defaults(for: "starrail"), for: "starrail") }
+        var hudOptions = LaunchSettings.defaults(for: "starrail")
+        hudOptions.metalHUDContents = .custom
+        hudOptions.metalHUDElements = [.fps, .thermal]
+        hudOptions.metalHUDPosition = .centerLeft
+        hudOptions.metalHUDSize = .small
+        _ = try await f.saveSnapshot(state: .spawning, processes: [f.gameProcess.identity], backend: .dxmt,
+            metalHUD: metalHUD, hudOptions: hudOptions, processGroupIDs: [54321])
+        try await BlockingIO.run {
+            var changed = LaunchSettings.defaults(for: "starrail"); changed.metalHUD = !metalHUD
+            try LaunchSettingsStore(paths: f.paths).save(changed, for: "starrail")
+        }
         let sessions = await manager.reattachAll()
         #expect(sessions["starrail"]?.settings.backend == .dxmt)
+        hudOptions.backend = .dxmt
+        hudOptions.metalHUD = metalHUD
+        #expect(sessions["starrail"]?.settings == hudOptions)
+        #expect(f.spawner.calls.isEmpty)
         #expect(sessions["starrail"]?.bundleID == "bundle-a")
         #expect(f.inspector.values.prefixes.allSatisfy { $0 == f.prefix.path })
         await f.clock.waitForSleep(1, duration: .seconds(3))

@@ -11,6 +11,14 @@ import RuntimeManager
     func launchState(for id: String) -> LaunchUIState? { launchStates[id] }
     func launchSettings(for id: String) -> LaunchSettings { launchSettingsCache[id] ?? .defaults(for: id) }
 
+    func metalHUD(for gameID: String) -> Bool { launchSettings(for: gameID).metalHUD }
+
+    func setMetalHUD(_ enabled: Bool, for gameID: String) throws {
+        var settings = launchSettings(for: gameID)
+        settings.metalHUD = enabled
+        try saveLaunchSettings(settings, for: gameID)
+    }
+
     /// The synchronous view API validates immediately and updates its observable
     /// snapshot. Serialized durable writes leave the main actor; Play and export
     /// join the queue, and a write failure is surfaced rather than launching with
@@ -42,11 +50,17 @@ import RuntimeManager
     }
 
     func setGlobalLaunchPreference(_ key: WritableKeyPath<GlobalLaunchSettings, Bool>, to value: Bool) {
+        var settings = globalLaunchSettings
+        settings[keyPath: key] = value
+        do { try saveGlobalLaunchSettings(settings) }
+        catch { show(error) }
+    }
+
+    func saveGlobalLaunchSettings(_ settings: GlobalLaunchSettings) throws {
         // No settings writes may enter behind the restart's final flush.
-        guard languageRestart == nil else { show(LauncherError.busy("Application language restart is in progress")); return }
-        let preferences = launchPreferences
-        globalLaunchSettings[keyPath: key] = value
-        let settings = globalLaunchSettings, revision = UUID()
+        guard languageRestart == nil else { throw LauncherError.busy("Application language restart is in progress") }
+        let preferences = launchPreferences, revision = UUID()
+        globalLaunchSettings = settings
         launchSettingsRevision = revision; launchSettingsRevisions["global"] = revision
         enqueueSettingsWrite(key: "global") { try preferences.saveGlobal(settings) } didCommit: { [weak self] in
             self?.durableGlobalLaunchSettings = settings
@@ -76,7 +90,8 @@ import RuntimeManager
     }
 
     func reattachOnStart() async {
-        if let task = launchStartupTask { await task.value; return }
+        let playTimeStartup = startPlayTime()
+        if let task = launchStartupTask { await task.value; await playTimeStartup.value; return }
         let services = launchServices, preferences = launchPreferences
         let task = Task { [weak self] in
             guard let self else { return }
@@ -108,6 +123,8 @@ import RuntimeManager
         }
         launchStartupTask = task
         await task.value
+        await playTimeStartup.value
+        await refreshPlayTime()
     }
 
     func play(_ id: String) {
@@ -143,12 +160,17 @@ import RuntimeManager
                 }
                 try await self.flushLaunchSettings()
                 guard let record = self.gameRecords[id] else { throw LauncherError.io("Game is not installed") }
+                try await self.recheckGameLocation(id)
                 for await event in try await services.launch(game: game, record: record) {
                     if Task.isCancelled { return } // Detaches the observer; core supervision survives.
                     await self.handleLaunch(event, id: id)
                 }
                 // .restored may be delivered before the core releases its context.
                 _ = await self.refreshLaunchSession(id)
+            } catch LauncherError.installVolumeUnavailable {
+                self.launchStates[id] = nil
+                self.liveLaunchGames.remove(id)
+                if self.launchSlotOwner == id { self.launchSlotOwner = nil }
             } catch {
                 self.recordLaunchFailure(LaunchFailureInfo(stage: .preflight,
                     message: launcherError(error).userMessage, hasLog: false, unverifiedBuild: false), id: id)
@@ -171,7 +193,9 @@ import RuntimeManager
             await captureLog(id)
             observeGameWindow(id)
         case .ready: launchStates[id] = .ready; launchWindows.ready(gameID: id)
-        case .ended: recordVerifiedEnd(id)
+        case .ended:
+            recordVerifiedEnd(id)
+            await refreshPlayTime()
         case .restored(let outcome):
             switch outcome {
             case .pending:
@@ -187,6 +211,7 @@ import RuntimeManager
             case .clean:
                 _ = await refreshLaunchSession(id)
             }
+            await refreshPlayTime()
         case .failed(let failure):
             if sessionLogsEnabled { launchLogURLs[id] = failure.logURL ?? launchLogURLs[id] }
             else { launchLogURLs[id] = nil }
