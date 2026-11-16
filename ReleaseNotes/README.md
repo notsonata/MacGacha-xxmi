@@ -16,7 +16,8 @@ SRMI version and compatibility-package version separately. Include New, Fixes,
 Changes, Limitations and Install/Downloads. Do not call the standalone core the
 full XXMI Launcher or equate successful rendering with account safety.
 
-The current `v0.3.0-xxmi.1` release is regular/latest, with exactly the DMG and
-complete standalone XXMI ZIP uploaded. Source/checksums belong to the separate
-compatibility release. GitHub's automatic source links are expected. The current
-release was prepared manually, not by the legacy signed-appcast draft workflow.
+The current `v0.3.2-xxmi.1` release is regular/latest, with the DMG and both
+standalone XXMI ZIPs (HSR and ZZZ) and their checksums uploaded. Raw packages
+and corresponding source belong to the separate `xxmi-hsr-…` and `xxmi-zzz-…`
+package releases. GitHub's automatic source links are expected. The release was
+prepared manually, not by the legacy signed-appcast draft workflow.
