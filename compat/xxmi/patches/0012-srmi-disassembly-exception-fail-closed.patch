@@ -1,0 +1,46 @@
+# SRMI disassembly exception fail-closed guard
+# Base: XXMI-Libs-Package 065dc746c21c71ef48bbc93cb6b90b3dcdf766e6 (XXMI Libraries v1.2.3)
+# Apply from the XXMI Libs package root after patches 0001-0007 and 0009-0011:
+#   patch -p1 --fuzz=0 < 0012-srmi-disassembly-exception-fail-closed.patch
+#
+# BinaryToAsmText() calls the DXBC disassembler without an exception guard.
+# A [ShaderRegex] section sends every matching game shader through
+# HackerContext::DeferredShaderReplacement() on the draw path, and the
+# disassembler's comment parser and instruction decoder can throw a C++
+# exception (observed: std::out_of_range "invalid string position") on a
+# shader they do not understand. Nothing on that path catches it, so the game
+# terminates.
+#
+# Callers already treat an empty result as "disassembly failed" and keep the
+# original shader; the later regex and assembler steps are already guarded.
+# This patch catches std::exception (logging what()) and any other exception
+# around the DX11 disassembler call and returns an empty string. The DX9
+# branch, the HRESULT failure path and successful disassembly are unchanged.
+# util.h is included by many first-party translation units; the stage-3 full
+# first-party rebuild recompiles all of them.
+#
+--- a/util.h
++++ b/util.h
+@@ -771,8 +771,20 @@
+ #if MIGOTO_DX == 9
+ 	r = disassemblerDX9(&byteCode, &disassembly, comments.c_str());
+ #elif MIGOTO_DX == 11
+-	r = disassembler(&byteCode, &disassembly, comments.c_str(), hexdump,
+-			d3dcompiler_46_compat, disassemble_undecipherable_data, patch_cb_offsets);
++	// The DXBC disassembler can throw (for example std::out_of_range from a
++	// std::string operation on an unexpected shader), and callers on the draw
++	// path do not catch it. Fail closed: treat it like a failed disassembly so
++	// the caller keeps the original shader.
++	try {
++		r = disassembler(&byteCode, &disassembly, comments.c_str(), hexdump,
++				d3dcompiler_46_compat, disassemble_undecipherable_data, patch_cb_offsets);
++	} catch (const std::exception &e) {
++		LogInfo("  disassembly failed with exception: %s\n", e.what());
++		return "";
++	} catch (...) {
++		LogInfo("  disassembly failed with an unknown exception\n");
++		return "";
++	}
+ #endif // MIGOTO_DX
+ 	if (FAILED(r)) {
+ 		LogInfo("  disassembly failed. Error: %x\n", r);

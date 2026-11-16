@@ -11,9 +11,12 @@ Git by this directory; generated package files live under the ignored
 
 ## Package inputs
 
-The released package version is `2.4.3-macgacha.3` (in v0.3.0-xxmi.1),
-which moves the shared core to XXMI Libraries v1.2.3 and adds the
-conditional-fold correction. The previous package was `2.4.3-macgacha.2`, built
+The bundled package version is `2.4.3-macgacha.4` (ZZZ: `1.5.2-macgacha.2`),
+which adds the disassembly-exception correction (patch 0012) to the shared
+core; it is not yet released. The released package version is
+`2.4.3-macgacha.3` (in v0.3.0-xxmi.1), which moves the shared core to XXMI
+Libraries v1.2.3 and adds the conditional-fold correction. The package before
+that was `2.4.3-macgacha.2`, built
 from XXMI Libraries v1.2.2 (commit `a7847eae82aaac32175c9a7d199673d5c9323bcd`,
 signed archive `13034531d4855e05273d9fbaf18539ec390432950ebd5986a115e5d3e5d8e275`).
 

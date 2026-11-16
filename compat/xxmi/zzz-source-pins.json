@@ -7,7 +7,7 @@
   ],
   "package": {
     "id": "zzz-zzmi",
-    "version": "1.5.2-macgacha.1",
+    "version": "1.5.2-macgacha.2",
     "gameID": "zzz",
     "targetExe": "ZenlessZoneZero.exe",
     "supportedRuntimeBundleIDs": [
@@ -75,8 +75,8 @@
       ]
     },
     "payload": {
-      "sha256": "e519f0241d86a45d408838aedf228ea274cb6e4a94ac55e4614bceec0c1a78bc",
-      "size": 4520960,
+      "sha256": "fb8156f10e87c2e5d017cb9dc1497f8d11f7f82948663476d3a10720d26350f9",
+      "size": 4522496,
       "kind": "PE32+ x86-64 DLL",
       "role": "Shared XXMI core D3D11 proxy from the pinned XXMI Libraries build. It is game-configuration driven; ZZMI supplies its own configuration and does not ship the SRMI config.",
       "resources": [
@@ -186,7 +186,7 @@
     "sharedXxmiCore": {
       "pins": "compat/xxmi/source-pins.json",
       "buildPlan": "compat/xxmi/build/payload-build-plan.json",
-      "verifiedPayloadSHA256": "e519f0241d86a45d408838aedf228ea274cb6e4a94ac55e4614bceec0c1a78bc",
+      "verifiedPayloadSHA256": "fb8156f10e87c2e5d017cb9dc1497f8d11f7f82948663476d3a10720d26350f9",
       "role": "The shared XXMI core DLL is game-configuration driven. ZZMI uses this pinned core with its own config instead of the SRMI config.",
       "license": "GPL-3.0-only",
       "commit": "065dc746c21c71ef48bbc93cb6b90b3dcdf766e6",
@@ -208,9 +208,9 @@
     "cleanSourceTreeFileCount": 632,
     "baseCandidateSHA256": "1f0166741d9e76fe8e43c59b2eef5e15e40a8e9e15259eef718cfa19e0cbfaba",
     "basePatchedTreeSHA256": "802f54a5963e049d909aeed36a3387401ee88e185c8c43c533dd5d84b6fbe7e5",
-    "finalCandidateSHA256": "e519f0241d86a45d408838aedf228ea274cb6e4a94ac55e4614bceec0c1a78bc",
+    "finalCandidateSHA256": "fb8156f10e87c2e5d017cb9dc1497f8d11f7f82948663476d3a10720d26350f9",
     "plan": "compat/xxmi/build/payload-build-plan.json",
-    "finalPatchedTreeSHA256": "40a10ae8123026dd1b34faea7c079a5a464d770a3abb541bb892edfc07e68a65",
+    "finalPatchedTreeSHA256": "3a0c9e263d52c42e3c46963778ac96b14116b690647efd18e612d7e9a35269b4",
     "finalStage": 3
   },
   "sources": {
@@ -237,7 +237,7 @@
     "shared-xxmi-core": {
       "pins": "compat/xxmi/source-pins.json",
       "buildPlan": "compat/xxmi/build/payload-build-plan.json",
-      "verifiedPayloadSHA256": "e519f0241d86a45d408838aedf228ea274cb6e4a94ac55e4614bceec0c1a78bc",
+      "verifiedPayloadSHA256": "fb8156f10e87c2e5d017cb9dc1497f8d11f7f82948663476d3a10720d26350f9",
       "license": "GPL-3.0-only",
       "commit": "065dc746c21c71ef48bbc93cb6b90b3dcdf766e6",
       "version": "1.2.3",

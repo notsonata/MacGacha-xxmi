@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "purpose": "Minimal authenticated source excerpt for the SRMI disassembly exception fail-closed regression test (patch 0012).",
+  "source": {
+    "repository": "https://github.com/SpectrumQT/XXMI-Libs-Package",
+    "tag": "v1.2.3",
+    "commit": "065dc746c21c71ef48bbc93cb6b90b3dcdf766e6",
+    "license": "GPL-3.0-only",
+    "archiveSHA256": "00cb5eafa7fae0848595d15ddff933ff0d6290500a0cf56b73b79a13e7d5a09e",
+    "cleanTreeSHA256": "9981b207512f4190192ab5151472fcd76a398855659b14eb74ebfb00828b73aa",
+    "cleanFileCount": 632
+  },
+  "excerpts": [
+    {
+      "path": "util.h",
+      "bannerLineCount": 6,
+      "segmentSeparator": "// --- verbatim source excerpt gap ---\n",
+      "segmentSeparatorLineCount": 1,
+      "segments": [
+        {
+          "sourceStart": 751,
+          "sourceEnd": 783,
+          "lineCount": 33,
+          "sha256": "525c1ebb25de9fab8655c97178e87c476586fa255661210700ed9f539f962ba7"
+        }
+      ],
+      "fixtureLineCount": 39,
+      "fixtureSHA256": "391526f0f328df2289a04ced6ea80e45219d11a8c58fc8909acdccb62fda26f7"
+    }
+  ]
+}

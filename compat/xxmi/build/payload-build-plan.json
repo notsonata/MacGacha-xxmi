@@ -3639,10 +3639,14 @@
       {
         "path": "compat/xxmi/patches/0011-srmi-conditional-fold-fail-closed.patch",
         "sha256": "ed484b91b38e6234d3b7d07045cf199f02337b4604d15ed52678c9ac7a09a6d9"
+      },
+      {
+        "path": "compat/xxmi/patches/0012-srmi-disassembly-exception-fail-closed.patch",
+        "sha256": "07208e1cc4f5d5dfa52849b0b1d187a11b3e563f4372659bf01def3ca7fbf9e8"
       }
     ],
-    "patchedTreeSHA256": "40a10ae8123026dd1b34faea7c079a5a464d770a3abb541bb892edfc07e68a65",
-    "candidateSHA256": "e519f0241d86a45d408838aedf228ea274cb6e4a94ac55e4614bceec0c1a78bc",
+    "patchedTreeSHA256": "3a0c9e263d52c42e3c46963778ac96b14116b690647efd18e612d7e9a35269b4",
+    "candidateSHA256": "fb8156f10e87c2e5d017cb9dc1497f8d11f7f82948663476d3a10720d26350f9",
     "compile": [
       {
         "source": "crc32c-hw-1.0.5/src/crc32c.cpp",
@@ -4650,8 +4654,8 @@
         "source": "DirectX11/HackerContext.cpp",
         "object": "DirectX11__HackerContext.cpp.obj",
         "sourceSHA256": "2835728d34e2ae200a8a39fbbc965ad6cc8a0390dd947b4d8a8c31791b456615",
-        "objectSHA256": "d7b54cb620a832f796ff4ee841440232a185b342a29e8762d7b6881689cb028b",
-        "objectCanonicalSHA256": "efe5d9bc8e71452b13f76bda5c2a8b2123af5fe46ecbf6cd02c86043565799e9",
+        "objectSHA256": "b570072fdaea2db8cbe3febb3170c80ef33923829e946ae38ee288bf1b48fdbf",
+        "objectCanonicalSHA256": "778b61ab5da3c261edd0e312a5c06474e7866072e1e2e94f8fca119fb4d23d05",
         "argv": [
           "{CLANGXX}",
           "--target=x86_64-pc-windows-msvc",
@@ -4727,8 +4731,8 @@
         "source": "DirectX11/HackerDevice.cpp",
         "object": "DirectX11__HackerDevice.cpp.obj",
         "sourceSHA256": "729d964351772ef33a9f78c93065fe06814fed95c84544c343b840004e77f91a",
-        "objectSHA256": "2700a096fcc1a30f842d506f3c37f25cf5d4f5269847aa4b0ff2005a32a59542",
-        "objectCanonicalSHA256": "12d61c4ab30a1b6c1ebe4ed14e3debaf1b0cd8bb5307215004c3fe9025efa78c",
+        "objectSHA256": "8d2d8c02d0f45d77de8e1b6e05ce48794201d8fe47268750232d61dd27ebb569",
+        "objectCanonicalSHA256": "767bf9d81d27bf4b4513ed8a279adea3722f16ab12c7022b4e12131cd9177d4f",
         "argv": [
           "{CLANGXX}",
           "--target=x86_64-pc-windows-msvc",
@@ -5266,8 +5270,8 @@
         "source": "DirectX11/Hunting.cpp",
         "object": "DirectX11__Hunting.cpp.obj",
         "sourceSHA256": "e0678631a14bbf2e8aaf83cef4050c1212d7988d4993a16428ab4558f011170a",
-        "objectSHA256": "e05e2391f5e37ac2a04054dce7f251f1b5b05319fb65dac39023e61dc0401ac7",
-        "objectCanonicalSHA256": "e3a740b30b39322e8d80f50db775c1fde30b32bd1c39aeebe8504da25ffb3098",
+        "objectSHA256": "efd2e97ce6bb17878155f5f8659b1e2685a32f7d14ea3feb75c5eb28955cc589",
+        "objectCanonicalSHA256": "f7d2859a9da58ea6d4fd2484951b3364efd895293f4ad55de7198beefbae4bac",
         "argv": [
           "{CLANGXX}",
           "--target=x86_64-pc-windows-msvc",
@@ -6411,7 +6415,7 @@
         "{BUILD}/DirectX11.res"
       ]
     },
-    "candidateSize": 4520960
+    "candidateSize": 4522496
   },
   "resources": {
     "tool": "scripts/xxmi-payload-resources.py",

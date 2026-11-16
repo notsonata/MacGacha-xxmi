@@ -567,7 +567,8 @@ class ConditionalFoldTests(unittest.TestCase):
             stage3.get("compat/xxmi/patches/0011-srmi-conditional-fold-fail-closed.patch"), digest
         )
         pins = load_json(SOURCE_PINS)["sources"]["patches"]
-        self.assertEqual(pins["order"][-1], FOLD_PATCH.name)
+        self.assertIn(FOLD_PATCH.name, pins["order"])
+        self.assertEqual(pins["order"], sorted(pins["order"]))
         self.assertEqual(pins["sha256"][FOLD_PATCH.name], digest)
 
     def test_patch_adds_only_the_guard(self) -> None:

@@ -632,7 +632,7 @@ class CheckedInResourcePinTests(unittest.TestCase):
         self.assertEqual(self.plan["sourcePin"]["cleanTreeSHA256"],
                          "9981b207512f4190192ab5151472fcd76a398855659b14eb74ebfb00828b73aa")
         self.assertEqual(self.plan["stage3"]["patchedTreeSHA256"],
-                         "40a10ae8123026dd1b34faea7c079a5a464d770a3abb541bb892edfc07e68a65")
+                         "3a0c9e263d52c42e3c46963778ac96b14116b690647efd18e612d7e9a35269b4")
 
     def test_package_pins_require_the_same_resources_as_the_plan(self):
         expected = RES.expected_dll_resources(self.resources)
