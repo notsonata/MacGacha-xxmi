@@ -31,11 +31,9 @@ struct ModSupportLaunchAdapter: LaunchInjectionPreparing {
         guard let profile = ModSupportProfile.find(gameID: gameID),
             let store = stores[gameID] else { return nil }
         guard let snapshot = try await store.prepareLaunch(gameID: gameID,
-            runtimeBundleID: runtimeBundleID, backendD3D11: backendD3D11) else { return nil }
-        return LaunchInjectionConfiguration(runnerURL: snapshot.runnerURL,
-            injectorURL: snapshot.injectorURL, payloadURL: snapshot.payloadURL,
-            sessionDirectory: snapshot.sessionDirectory, gameID: gameID,
-            targetExecutable: profile.runnerTarget)
+            runtimeBundleID: runtimeBundleID, backendD3D11: backendD3D11,
+            sessionDriveLetter: LaunchInjectionConfiguration.sessionDriveLetter) else { return nil }
+        return Self.configuration(snapshot, gameID: gameID, profile: profile)
     }
 
     func prepare(game: GameDefinition, runtimeBundleID: String, backendD3D11: URL,
@@ -44,11 +42,20 @@ struct ModSupportLaunchAdapter: LaunchInjectionPreparing {
             let store = stores[game.id] else { return nil }
         guard let snapshot = try await store.prepareLaunch(gameID: game.id,
             runtimeBundleID: runtimeBundleID, backendD3D11: backendD3D11,
-            directX12: settings.directX12) else { return nil }
-        return LaunchInjectionConfiguration(runnerURL: snapshot.runnerURL,
+            directX12: settings.directX12,
+            sessionDriveLetter: LaunchInjectionConfiguration.sessionDriveLetter) else { return nil }
+        return Self.configuration(snapshot, gameID: game.id, profile: profile)
+    }
+
+    /// The hook runner stays implicit (nil) so Star Rail journals keep their
+    /// exact bytes; only native snapshots record their loading mode.
+    static func configuration(_ snapshot: PreparedModLaunch, gameID: String,
+        profile: ModSupportProfile) -> LaunchInjectionConfiguration {
+        LaunchInjectionConfiguration(runnerURL: snapshot.runnerURL,
             injectorURL: snapshot.injectorURL, payloadURL: snapshot.payloadURL,
-            sessionDirectory: snapshot.sessionDirectory, gameID: game.id,
-            targetExecutable: profile.runnerTarget)
+            sessionDirectory: snapshot.sessionDirectory, gameID: gameID,
+            targetExecutable: profile.runnerTarget,
+            loading: snapshot.loadingMode == .hookRunner ? nil : snapshot.loadingMode)
     }
 
     func finish(configuration: LaunchInjectionConfiguration) async throws {

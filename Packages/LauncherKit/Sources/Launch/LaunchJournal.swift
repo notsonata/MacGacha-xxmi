@@ -43,7 +43,8 @@ public struct LaunchJournal: Sendable {
     public func delete(game: String) throws {
         try withOwnership { fs in
             if let s = try read(game: game) {
-                guard s.hides.isEmpty, s.state == .done || s.state == .recoveryConflict else {
+                // Native proxy files still owned in the prefix keep the journal.
+                guard s.hides.isEmpty, s.nativeProxy == nil, s.state == .done || s.state == .recoveryConflict else {
                     throw LauncherError.busy("Launch recovery is not resolved")
                 }
             }

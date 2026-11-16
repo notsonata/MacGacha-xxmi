@@ -236,9 +236,14 @@ private func resolvedLaunch(_ f: ManagerFixture, selection: LaunchRuntimeSelecti
         #expect(call.currentDirectory == f.installRoot)
         #expect(call.environment == original.environment)
         #expect(call.environment["WINEPREFIX"] == f.prefix.path)
-        #expect(call.arguments == [WinePath.windowsPath(for: configuration.runnerURL), "--loader",
-            WinePath.windowsPath(for: configuration.injectorURL), "--payload",
-            WinePath.windowsPath(for: configuration.payloadURL), "--"] + original.arguments)
+        let sessions = configuration.sessionDirectory.deletingLastPathComponent()
+        let drive = { (url: URL) in try LaunchInjection.sessionDrivePath(for: url, sessionsRoot: sessions) }
+        #expect(call.arguments == [try drive(configuration.runnerURL), "--loader",
+            try drive(configuration.injectorURL), "--payload",
+            try drive(configuration.payloadURL), "--"] + original.arguments)
+        #expect(try drive(configuration.payloadURL).hasPrefix("M:\\"))
+        #expect(try FileManager.default.destinationOfSymbolicLink(
+            atPath: f.prefix.appendingPathComponent("dosdevices/m:").path) == sessions.standardizedFileURL.path)
         #expect(call.arguments.suffix(original.arguments.count) == original.arguments[...])
         let request = try #require(provider.calls.first)
         #expect(request.gameID == "starrail")
@@ -269,6 +274,9 @@ private func resolvedLaunch(_ f: ManagerFixture, selection: LaunchRuntimeSelecti
         let pending = try #require(try await f.journal())
         #expect(pending.endLogged != true)
         #expect(pending.state == .recoveryPending)
+        // The play-time end is checkpointed before the mod finish, so a
+        // finish that keeps failing cannot move the recorded end later.
+        #expect(pending.verifiedEndedAt != nil)
         #expect(provider.finished == [configuration])
         provider.allowFinish()
         try await manager.recoverIfNeeded(game: "starrail")
@@ -483,6 +491,41 @@ private func resolvedLaunch(_ f: ManagerFixture, selection: LaunchRuntimeSelecti
         }
     }
 
+    @Test func sessionDriveIsCreatedReusedReplacedWhenStaleAndNeverOverwrittenWhenForeign() async throws {
+        let f = try await ManagerFixture.make()
+        let valid = try makeInjectionSnapshot(f)
+        let selection = try makeAllowedRuntime(f)
+        try addRootDriveMapping(f)
+        let link = f.prefix.appendingPathComponent("dosdevices/m:")
+        let sessions = valid.sessionDirectory.deletingLastPathComponent().standardizedFileURL.path
+        let target = { try FileManager.default.destinationOfSymbolicLink(atPath: link.path) }
+        let validate = {
+            try await BlockingIO.run {
+                try LaunchInjection.validate(valid, paths: f.paths, prefix: f.prefix, bundle: selection.bundle)
+            }
+        }
+        // Created on first use, then reused unchanged.
+        let prepared = try await validate()
+        #expect(try target() == sessions)
+        #expect(prepared.windowsPayloadPath.hasPrefix("M:\\"))
+        #expect(!prepared.windowsPayloadPath.contains("Application Support"))
+        _ = try await validate()
+        #expect(try target() == sessions)
+
+        // MacGacha's own stale mapping (another sessions folder) is replaced.
+        try FileManager.default.removeItem(at: link)
+        let stale = f.paths.root.appendingPathComponent("XXMI/Sessions/zzz").standardizedFileURL.path
+        try FileManager.default.createSymbolicLink(atPath: link.path, withDestinationPath: stale)
+        _ = try await validate()
+        #expect(try target() == sessions)
+
+        // A mapping the user made elsewhere is never overwritten.
+        try FileManager.default.removeItem(at: link)
+        try FileManager.default.createSymbolicLink(atPath: link.path, withDestinationPath: "/Volumes/Elsewhere")
+        await #expect(throws: LauncherError.self) { _ = try await validate() }
+        #expect(try target() == "/Volumes/Elsewhere")
+    }
+
     @Test func injectionSnapshotSurvivesSessionJournalRoundTripAndLegacyDecode() async throws {
         let f = try await ManagerFixture.make()
         let configuration = try makeInjectionSnapshot(f)
@@ -522,7 +565,9 @@ private func resolvedLaunch(_ f: ManagerFixture, selection: LaunchRuntimeSelecti
         #expect(f.proxy.starts == 0)
     }
 
-    @Test func zzzInjectionUsesItsExplicitTargetAndDirect3D11() async throws {
+    @Test func newZZZHookRunnerSnapshotIsRefusedBeforeSpawn() async throws {
+        // New ZZZ sessions load natively (NativeProxyManagerTests). A hook-runner
+        // ZZZ snapshot is refused instead of silently using the helper route.
         let f = try await ManagerFixture.make()
         try addRootDriveMapping(f)
         let selection = try makeAllowedRuntime(f)
@@ -533,36 +578,19 @@ private func resolvedLaunch(_ f: ManagerFixture, selection: LaunchRuntimeSelecti
         let configuration = try makeZZZInjectionSnapshot(f)
         let provider = RecordingInjectionProvider(configuration: configuration)
         let spawner = InjectionSpawner()
-        spawner.afterSpawn {
-            f.inspector.update {
-                $0.processes = [InspectedProcess(identity: spawner.identity,
-                    executablePath: "/wine/ZenlessZoneZero.exe", arguments: [])]
-                $0.alive = [spawner.identity]
-            }
-        }
         let manager = makeManager(f, selection: selection, provider: provider, spawner: spawner)
         let events = ManagerEvents()
         let game = try #require(GameDefinition.find("zzz"))
         let stream = await manager.launch(game: game, installRoot: f.installRoot, gameBuild: "3.3.0")
         let consumer = Task { for await event in stream { await events.append(event) } }
-        await events.waitForRunning()
+        await events.wait { if case .failed = $0 { true } else { false } }
+        await consumer.value
 
-        let call = try #require(spawner.calls.first)
-        let original = try LaunchResolver.resolve(recipe: try #require(Recipes.recipe(for: "zzz")),
-            settings: settings, installRoot: f.installRoot, prefix: f.prefix,
-            wineBinary: selection.bundle.wineBinary, proxyPort: f.proxy.port,
-            componentRoots: selection.componentRoots, baseEnvironment: [:],
-            runtimeBundleID: selection.bundle.id.rawValue)
-        #expect(call.arguments == [WinePath.windowsPath(for: configuration.runnerURL), "--loader",
-            WinePath.windowsPath(for: configuration.injectorURL), "--payload",
-            WinePath.windowsPath(for: configuration.payloadURL), "--target-exe",
-            "ZenlessZoneZero.exe", "--"] + original.arguments)
-        #expect(call.arguments.suffix(original.arguments.count) == original.arguments[...])
-        let journal = try await BlockingIO.run { try LaunchJournal(paths: f.paths).read(game: "zzz") }
-        #expect(journal?.injection?.gameID == "zzz")
-        #expect(journal?.injection?.resolvedTargetExecutable == "ZenlessZoneZero.exe")
-
-        try await f.end(manager); await consumer.value
+        #expect(spawner.calls.isEmpty)
+        #expect(f.proxy.starts == 0)
+        #expect(provider.discarded == [configuration])
+        #expect(provider.finished.isEmpty)
+        #expect(try await BlockingIO.run { try LaunchJournal(paths: f.paths).read(game: "zzz") } == nil)
     }
 
     @Test func zzzDirectX12InjectionFailsClosedBeforeSnapshotAndPreparation() async throws {

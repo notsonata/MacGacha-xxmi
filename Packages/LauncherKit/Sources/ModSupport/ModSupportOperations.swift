@@ -263,6 +263,128 @@ extension ModSupportStore {
         try fs.writeAtomically(data, to: path)
     }
 
+    // MARK: - Native proxy snapshots
+
+    /// The shipped ZZMI core include and mods folder a native snapshot must load.
+    static let nativeCoreInclude = "Core\\ZZMI\\main.ini"
+    static let nativeModsInclude = "Mods"
+    static let nativeRequiredFiles = ["d3d11.dll", "d3dcompiler_47.dll", "d3dx.ini", "Core/ZZMI/main.ini"]
+    static let nativeRequiredDirectories = ["Core", "Core/ZZMI", "Mods"]
+
+    static func validateSessionDriveLetter(_ letter: String) throws {
+        guard letter.utf8.count == 1, let byte = letter.utf8.first, (UInt8(ascii: "A")...UInt8(ascii: "Z")).contains(byte),
+            letter != "C", letter != "Z" else {
+            throw LauncherError.io("Invalid mod session drive letter")
+        }
+    }
+
+    /// The game-visible payload folder of this session through the session drive,
+    /// for example `M:\<session UUID>\payload`.
+    static func sessionDrivePayloadPath(letter: String, sessionName: String,
+        payloadDirectory: SafeRelativePath?) throws -> String {
+        try validateSessionDriveLetter(letter)
+        guard isCanonicalSessionName(sessionName) else { throw LauncherError.unsafePath(sessionName) }
+        return ([letter + ":", sessionName] + (payloadDirectory?.components ?? [])).joined(separator: "\\")
+    }
+
+    /// Verifies the copied snapshot (never the installed package) holds every
+    /// file the game loads natively as real files and directories. Symlinks fail
+    /// closed through `itemType`.
+    static func verifyNativeSnapshot(manifest: ModPackageManifest, fs: ContainedFileSystem,
+        sessionPath: SafeRelativePath, payloadDirectory: SafeRelativePath?) throws {
+        guard try SafeRelativePath(manifest.payloadPath).components.last == "d3d11.dll" else {
+            throw LauncherError.io("The native mod payload must be d3d11.dll")
+        }
+        let prefix = sessionPath.description + "/" + (payloadDirectory.map { $0.description + "/" } ?? "")
+        for directory in nativeRequiredDirectories {
+            guard try fs.itemType(at: SafeRelativePath(prefix + directory)) == .directory else {
+                throw LauncherError.io("The mod package is missing \(directory) for native loading")
+            }
+        }
+        for file in nativeRequiredFiles {
+            guard try fs.itemType(at: SafeRelativePath(prefix + file)) == .regularFile else {
+                throw LauncherError.io("The mod package is missing \(file) for native loading")
+            }
+        }
+    }
+
+    /// Native loading edits only this session's `d3dx.ini` copy. The shipped
+    /// deferred core and mods includes must already be present and unambiguous;
+    /// a package that differs is refused rather than repaired.
+    static func configureNativeD3DX(fs: ContainedFileSystem, sessionPath: SafeRelativePath,
+        payloadDirectory: SafeRelativePath?, backend: String, target: String,
+        windowsPayloadDirectory: String) throws {
+        let prefix = payloadDirectory.map { $0.description + "/" } ?? ""
+        let path = try SafeRelativePath(sessionPath.description + "/" + prefix + "d3dx.ini")
+        guard try fs.itemType(at: path) == .regularFile else { throw LauncherError.unsafePath(path.description) }
+        let data = try fs.readFile(at: path, maxBytes: ModSupportConstants.maximumSettingsTextBytes)
+        guard let text = String(data: data, encoding: .utf8) else {
+            throw LauncherError.io("d3dx.ini is not UTF-8")
+        }
+        // Swift treats CRLF as one Character, so edit LF-normalized lines and
+        // restore the package's own line endings afterwards.
+        let crlf = text.contains("\r\n")
+        let normalized = text.replacingOccurrences(of: "\r\n", with: "\n")
+        try verifyNativeIncludes(normalized)
+        guard !windowsPayloadDirectory.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }) else {
+            throw LauncherError.io("Invalid mod session path")
+        }
+        var ini = D3DXIni(normalized)
+        try ini.set(section: "Loader", key: "target", value: target)
+        try ini.set(section: "Loader", key: "check_target_even_without_loader", value: "1")
+        try ini.set(section: "System", key: "proxy_d3d11", value: backend)
+        // Load includes during native initialization so VertexLimitRaise hashes
+        // register before buffers created ahead of the first Present.
+        try ini.set(section: "System", key: "skip_early_includes_load", value: "0")
+        try ini.set(section: "Include", key: "user_config", value: windowsPayloadDirectory + "\\d3dx_user.ini")
+        try ini.set(section: "Rendering", key: "override_directory", value: windowsPayloadDirectory + "\\ShaderFixes")
+        try ini.set(section: "Rendering", key: "cache_directory", value: windowsPayloadDirectory + "\\ShaderCache")
+        let output = crlf ? ini.rendered().replacingOccurrences(of: "\n", with: "\r\n") : ini.rendered()
+        guard let rendered = output.data(using: .utf8) else {
+            throw LauncherError.io("Cannot encode d3dx.ini")
+        }
+        try fs.writeAtomically(rendered, to: path)
+    }
+
+    /// Exactly one active `include` of the shipped core and one active
+    /// `include_recursive` of `Mods`; any other value is a conflict.
+    static func verifyNativeIncludes(_ text: String) throws {
+        let entries = activeEntries(text, section: "Include")
+        func values(_ key: String) -> [String] {
+            entries.filter { $0.key.caseInsensitiveCompare(key) == .orderedSame }
+                .map { $0.value.replacingOccurrences(of: "/", with: "\\") }
+        }
+        let core = values("include"), mods = values("include_recursive")
+        guard core.count == 1, core[0].caseInsensitiveCompare(nativeCoreInclude) == .orderedSame else {
+            throw LauncherError.io(core.isEmpty ? "d3dx.ini does not include the ZZMI core"
+                : "d3dx.ini has conflicting core includes")
+        }
+        guard mods.count == 1, mods[0].caseInsensitiveCompare(nativeModsInclude) == .orderedSame else {
+            throw LauncherError.io(mods.isEmpty ? "d3dx.ini does not include the Mods folder"
+                : "d3dx.ini has conflicting Mods includes")
+        }
+    }
+
+    /// Uncommented `key = value` lines of one section of LF-normalized text.
+    static func activeEntries(_ text: String, section: String) -> [(key: String, value: String)] {
+        var inSection = false
+        var result: [(key: String, value: String)] = []
+        for raw in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = raw.trimmingCharacters(in: .whitespaces.union(CharacterSet(charactersIn: "\r")))
+            if line.hasPrefix("["), let close = line.firstIndex(of: "]") {
+                let name = line[line.index(after: line.startIndex)..<close]
+                inSection = name.caseInsensitiveCompare(section) == .orderedSame
+                continue
+            }
+            guard inSection, !line.isEmpty, !line.hasPrefix(";"), !line.hasPrefix("#"),
+                let equals = line.firstIndex(of: "=") else { continue }
+            let key = line[..<equals].trimmingCharacters(in: .whitespaces)
+            let value = line[line.index(after: equals)...].trimmingCharacters(in: .whitespaces)
+            if !key.isEmpty { result.append((key, value)) }
+        }
+        return result
+    }
+
     static func impliedDirectories(_ files: Set<String>) -> Set<String> {
         var result: Set<String> = []
         for file in files {

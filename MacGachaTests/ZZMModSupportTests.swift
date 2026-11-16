@@ -152,9 +152,12 @@ private func makeZZZPackage(root: URL) throws -> ZZPackage {
         "hook-runner.exe": Data("runner".utf8),
         "3dmloader.dll": Data("injector".utf8),
         "payload/d3d11.dll": Data("payload".utf8),
+        "payload/d3dcompiler_47.dll": Data("compiler".utf8),
+        "payload/Core/ZZMI/main.ini": Data("[Constants]\nglobal $zzmi = 1\n".utf8),
         "payload/d3dx.ini": Data(("[Loader]\ntarget = Other.exe\nloader = old.exe\n\n"
             + "[System]\nproxy_d3d11 = Z:\\old\\d3d11.dll\n\n[Include]\n"
-            + "include_recursive = Mods\n").utf8),
+            + "include = Core\\ZZMI\\main.ini\ninclude_recursive = Mods\n"
+            + "[Rendering]\noverride_directory = ShaderFixes\ncache_directory = ShaderCache\n").utf8),
     ]
     for (path, data) in files {
         let url = source.appendingPathComponent(path)

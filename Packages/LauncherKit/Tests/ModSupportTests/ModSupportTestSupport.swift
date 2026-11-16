@@ -78,6 +78,15 @@ struct PackageFixture {
                 + "module = d3d11.dll\r\n\r\n[System]\r\nproxy_d3d11 = Z:\\old\\d3d11.dll\r\n\r\n"
                 + "[Include]\r\ninclude_recursive = Mods\r\n").utf8),
         ]
+        if gameID == "zzz" {
+            contents.removeValue(forKey: "payload/Core/SRMI/main.ini")
+            contents["payload/Core/ZZMI/main.ini"] = Data("[Constants]\nglobal $zzmi = 1\n".utf8)
+            contents["payload/d3dcompiler_47.dll"] = Data("compiler".utf8)
+            contents["payload/d3dx.ini"] = Data(("[Loader]\ntarget = Other.exe\nloader = old.exe\n"
+                + "[System]\nproxy_d3d11 = Z:\\old\\d3d11.dll\n"
+                + "[Include]\ninclude = Core\\ZZMI\\main.ini\ninclude_recursive = Mods\n"
+                + "[Rendering]\noverride_directory = ShaderFixes\ncache_directory = ShaderCache\n").utf8)
+        }
         for (path, data) in overrides { contents[path] = data }
         files = contents
         for (path, data) in contents {

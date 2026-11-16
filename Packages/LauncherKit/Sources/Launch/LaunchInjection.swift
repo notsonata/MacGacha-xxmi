@@ -56,15 +56,24 @@ public struct LaunchInjectionConfiguration: Codable, Equatable, Sendable {
     /// applies one game's injection context to another. Older journals omit it.
     public let gameID: String?
     public let targetExecutable: String?
+    /// How the snapshot reaches the game. Older journals omit it and always
+    /// used the hook runner; nil is never encoded, so their bytes are unchanged.
+    public let loading: ModLoadingMode?
 
     public var resolvedGameID: String { gameID ?? "starrail" }
     public var resolvedTargetExecutable: String { targetExecutable ?? "StarRail.exe" }
+    public var resolvedLoading: ModLoadingMode { loading ?? .hookRunner }
+
+    /// Drive letter (without colon) that maps the profile's sessions folder in
+    /// the game prefix. Snapshot INI paths and helper arguments use it.
+    public static let sessionDriveLetter = "M"
 
     public init(runnerURL: URL, injectorURL: URL, payloadURL: URL, sessionDirectory: URL,
-        gameID: String? = nil, targetExecutable: String? = nil) {
+        gameID: String? = nil, targetExecutable: String? = nil, loading: ModLoadingMode? = nil) {
         self.runnerURL = runnerURL; self.injectorURL = injectorURL; self.payloadURL = payloadURL
         self.sessionDirectory = sessionDirectory; self.gameID = gameID
         self.targetExecutable = targetExecutable
+        self.loading = loading
     }
 
     func validateForJournal() throws {
@@ -78,10 +87,17 @@ public struct LaunchInjectionConfiguration: Codable, Equatable, Sendable {
         guard ["StarRail.exe", "ZenlessZoneZero.exe"].contains(resolvedTargetExecutable) else {
             throw LauncherError.journalCorrupt("Invalid injection target executable")
         }
+        // Native loading is established only for Global ZZZ. Legacy hook-runner
+        // records (including older ZZZ ones) keep their existing validation.
+        if resolvedLoading == .nativeProxy {
+            guard gameID == "zzz", targetExecutable == "ZenlessZoneZero.exe" else {
+                throw LauncherError.journalCorrupt("Invalid native injection identity")
+            }
+        }
     }
 
     private enum CodingKeys: String, CodingKey {
-        case runnerURL, injectorURL, payloadURL, sessionDirectory, gameID, targetExecutable
+        case runnerURL, injectorURL, payloadURL, sessionDirectory, gameID, targetExecutable, loading
     }
 
     public init(from decoder: any Decoder) throws {
@@ -92,6 +108,7 @@ public struct LaunchInjectionConfiguration: Codable, Equatable, Sendable {
         sessionDirectory = try container.decode(URL.self, forKey: .sessionDirectory)
         gameID = try container.decodeIfPresent(String.self, forKey: .gameID)
         targetExecutable = try container.decodeIfPresent(String.self, forKey: .targetExecutable)
+        loading = try container.decodeIfPresent(ModLoadingMode.self, forKey: .loading)
     }
 }
 
@@ -129,12 +146,18 @@ enum LaunchInjection {
         let windowsInjectorPath: String
         let windowsPayloadPath: String
 
+        var loading: ModLoadingMode { configuration.resolvedLoading }
+
         /// The helper starts the original resolved guest command inside the same
         /// Wine host. Keeping the resolved Wine executable, environment, working
         /// directory and component copies preserves the normal launch contract.
         func wrap(_ launch: ResolvedLaunch, expectedGamePath: String) throws -> ResolvedLaunch {
-            guard launch.arguments.contains(expectedGamePath) else {
-                throw LauncherError.io("The resolved launch command is not the expected game executable")
+            try Self.checkTarget(launch, expectedGamePath: expectedGamePath)
+            // A native snapshot is never started through the helper: that would
+            // silently change its loading route. Its caller must place the
+            // payload and use `nativeLaunch` instead.
+            guard loading == .hookRunner else {
+                throw LauncherError.io("This mod snapshot uses native loading and cannot start through the hook runner")
             }
             var arguments = [windowsRunnerPath, "--loader", windowsInjectorPath, "--payload", windowsPayloadPath]
             // The runner keeps StarRail.exe as its default target; ZZZ must be
@@ -149,6 +172,22 @@ enum LaunchInjection {
                 blockedHosts: launch.blockedHosts, preparation: launch.preparation,
                 requiredComponents: launch.requiredComponents, componentCopies: launch.componentCopies,
                 displayFallback: launch.displayFallback, fpsInjector: launch.fpsInjector)
+        }
+
+        /// Native loading keeps the resolved command byte-for-byte unchanged. The
+        /// caller places the verified payload before spawning it.
+        func nativeLaunch(_ launch: ResolvedLaunch, expectedGamePath: String) throws -> ResolvedLaunch {
+            try Self.checkTarget(launch, expectedGamePath: expectedGamePath)
+            guard loading == .nativeProxy else {
+                throw LauncherError.io("This mod snapshot requires the hook runner")
+            }
+            return launch
+        }
+
+        private static func checkTarget(_ launch: ResolvedLaunch, expectedGamePath: String) throws {
+            guard launch.arguments.contains(expectedGamePath) else {
+                throw LauncherError.io("The resolved launch command is not the expected game executable")
+            }
         }
     }
 
@@ -178,14 +217,93 @@ enum LaunchInjection {
             sessionComponents: sessionComponents, fs: fs)
         let payload = try regularFile(configuration.payloadURL.standardizedFileURL, in: sessionDirectory,
             sessionComponents: sessionComponents, fs: fs)
+        if configuration.resolvedLoading == .nativeProxy {
+            try verifyNativePayload(configuration, payload: payload, sessionDirectory: sessionDirectory,
+                sessionComponents: sessionComponents, fs: fs)
+        }
         try verifyBackend(bundle: bundle, paths: paths)
         try verifyRootDrive(paths: paths, prefix: prefix)
+        let sessionsRoot = sessionDirectory.deletingLastPathComponent().standardizedFileURL
+        try mapSessionDrive(paths: paths, prefix: prefix, sessionsRoot: sessionsRoot)
         return Prepared(configuration: LaunchInjectionConfiguration(runnerURL: runner, injectorURL: injector,
             payloadURL: payload, sessionDirectory: sessionDirectory, gameID: configuration.gameID,
-            targetExecutable: configuration.targetExecutable),
-            windowsRunnerPath: WinePath.windowsPath(for: runner),
-            windowsInjectorPath: WinePath.windowsPath(for: injector),
-            windowsPayloadPath: WinePath.windowsPath(for: payload))
+            targetExecutable: configuration.targetExecutable, loading: configuration.loading),
+            windowsRunnerPath: try sessionDrivePath(for: runner, sessionsRoot: sessionsRoot),
+            windowsInjectorPath: try sessionDrivePath(for: injector, sessionsRoot: sessionsRoot),
+            windowsPayloadPath: try sessionDrivePath(for: payload, sessionsRoot: sessionsRoot))
+    }
+
+    /// Drive letter that maps the profile's sessions folder inside the game
+    /// prefix. 3DMigoto builds every mod path from the payload's own location,
+    /// and Windows path buffers are limited to 260 characters, so
+    /// `M:\<session>\payload\Mods\…` leaves about 64 more characters for each mod
+    /// than the full `Z:\Users\…\Application Support\MacGacha\XXMI\Sessions\…` path.
+    package static let sessionDrive = LaunchInjectionConfiguration.sessionDriveLetter.lowercased() + ":"
+
+    /// The game-visible path of a snapshot file through the session drive.
+    package static func sessionDrivePath(for url: URL, sessionsRoot: URL) throws -> String {
+        let components = try relativeComponents(of: url.standardizedFileURL, under: sessionsRoot)
+        return LaunchInjectionConfiguration.sessionDriveLetter + ":\\" + components.joined(separator: "\\")
+    }
+
+    /// Creates or verifies `dosdevices/m:` in the selected prefix. A mapping that
+    /// already points at this sessions folder is kept; MacGacha's own stale
+    /// mapping (another sessions folder under its data root) is replaced; any
+    /// other existing M: mapping fails closed instead of being overwritten.
+    private static func mapSessionDrive(paths: AppPaths, prefix: URL, sessionsRoot: URL) throws {
+        let prefixComponents = try relativeComponents(of: prefix.standardizedFileURL, under: paths.root)
+        let fs = try ContainedFileSystem(root: paths.root).pinRoot()
+        let dosdevicesPath = try SafeRelativePath((prefixComponents + ["dosdevices"]).joined(separator: "/"))
+        guard try fs.itemType(at: dosdevicesPath) == .directory else {
+            throw LauncherError.io("The selected prefix has no drive mappings")
+        }
+        let dosdevices = prefix.standardizedFileURL.appendingPathComponent("dosdevices", isDirectory: true)
+        let link = dosdevices.appendingPathComponent(sessionDrive)
+        let expected = sessionsRoot.standardizedFileURL.path
+        let manager = FileManager.default
+        if let entry = try fs.inspectTree(at: dosdevicesPath).first(where: { $0.path.components == [sessionDrive] }) {
+            guard entry.type == .other, let target = entry.linkTarget else {
+                throw LauncherError.io("Drive M: in the game prefix is used by something else; remove it to use mods")
+            }
+            let resolved = (target.hasPrefix("/") ? URL(fileURLWithPath: target)
+                : URL(fileURLWithPath: target, relativeTo: dosdevices)).standardizedFileURL
+            if resolved.path == expected { return }
+            let ownSessions = paths.root.standardizedFileURL.appendingPathComponent("XXMI/Sessions", isDirectory: true).path
+            guard resolved.path == ownSessions || resolved.path.hasPrefix(ownSessions + "/") else {
+                throw LauncherError.io("Drive M: in the game prefix already points to another folder; remove it to use mods")
+            }
+            try manager.removeItem(at: link)
+        }
+        try manager.createSymbolicLink(atPath: link.path, withDestinationPath: expected)
+    }
+
+    /// Files the game loads natively from the session payload. Everything must
+    /// be a real file or directory inside this game's own canonical session;
+    /// symlinks and foreign snapshots fail closed.
+    static let nativePayloadFiles = ["d3d11.dll", "d3dcompiler_47.dll", "d3dx.ini", "Core/ZZMI/main.ini"]
+    static let nativePayloadDirectories = ["Core", "Core/ZZMI", "Mods"]
+
+    private static func verifyNativePayload(_ configuration: LaunchInjectionConfiguration, payload: URL,
+        sessionDirectory: URL, sessionComponents: [String], fs: ContainedFileSystem) throws {
+        guard sessionComponents.count == 4, sessionComponents[2] == configuration.resolvedGameID,
+            let name = sessionComponents.last, UUID(uuidString: name)?.uuidString == name else {
+            throw LauncherError.unsafePath(sessionDirectory.path)
+        }
+        guard payload.lastPathComponent == "d3d11.dll" else {
+            throw LauncherError.io("The native mod payload must be d3d11.dll")
+        }
+        let payloadComponents = try relativeComponents(of: payload.deletingLastPathComponent().standardizedFileURL,
+            under: sessionDirectory)
+        let expected: [(String, ContainedFileSystem.ItemType)] = nativePayloadDirectories.map { ($0, .directory) }
+            + nativePayloadFiles.map { ($0, .regularFile) }
+        for (relative, type) in expected {
+            let path = try SafeRelativePath((sessionComponents + payloadComponents
+                + relative.split(separator: "/").map(String.init)).joined(separator: "/"))
+            // itemType refuses leaf and ancestor symlinks.
+            guard try fs.itemType(at: path) == type else {
+                throw LauncherError.io("The native mod snapshot is incomplete")
+            }
+        }
     }
 
     private static func regularFile(_ url: URL, in sessionDirectory: URL, sessionComponents: [String],

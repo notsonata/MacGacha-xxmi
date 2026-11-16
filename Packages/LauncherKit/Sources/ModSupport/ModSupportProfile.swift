@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // MacGacha — https://github.com/deruta74/MacGacha — see LICENSE and NOTICE (additional term under GPL section 7(b)).
 import Foundation
+import LauncherCore
 
 /// One supported game's XXMI identity. Storage, package and launch settings stay
 /// separate so installing or enabling one game can never touch another.
@@ -14,6 +15,9 @@ public struct ModSupportProfile: Sendable, Hashable {
     public let runnerTarget: String
     public let bundledSubdirectory: String
     public let suggestedLibraryFolderName: String
+    /// How this game's prepared snapshot is loaded. HSR keeps the established
+    /// hook runner; ZZZ loads the session payload as an ordinary native DLL.
+    public let loadingMode: ModLoadingMode
     /// The only runtime bundle injection is verified on. A newer recommended
     /// catalog bundle never inherits this authorization.
     public var verifiedRuntimeBundleID: String { ModSupportConstants.runtimeBundleID }
@@ -24,11 +28,13 @@ public struct ModSupportProfile: Sendable, Hashable {
     public static let starRail = ModSupportProfile(gameID: "starrail", packageID: "hsr-srmi",
         archiveName: "hsr-srmi.zip", manifestName: "manifest.json",
         runnerTarget: "StarRail.exe", bundledSubdirectory: "XXMI",
-        suggestedLibraryFolderName: "MacGacha-HSR-Mods", requiresExactPackageID: false)
+        suggestedLibraryFolderName: "MacGacha-HSR-Mods", loadingMode: .hookRunner,
+        requiresExactPackageID: false)
     public static let zzz = ModSupportProfile(gameID: "zzz", packageID: "zzz-zzmi",
         archiveName: "zzz-zzmi.zip", manifestName: "zzz-zzmi.manifest.json",
         runnerTarget: "ZenlessZoneZero.exe", bundledSubdirectory: "XXMI",
-        suggestedLibraryFolderName: "MacGacha-ZZZ-Mods", requiresExactPackageID: true)
+        suggestedLibraryFolderName: "MacGacha-ZZZ-Mods", loadingMode: .nativeProxy,
+        requiresExactPackageID: true)
 
     public static let all = [starRail, zzz]
 
