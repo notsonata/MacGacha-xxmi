@@ -208,6 +208,20 @@ package static func removeOldStorageLog(fs: ContainedFileSystem, game: String, p
         let record = try readOwnership(fs, path) else { throw LauncherError.busy("Session log is not obsolete") }
     if try fs.removeOwnedFile(at: path, matching: record.identity) {
         _ = try fs.removeOwnedFile(at: sidecar(path), matching: record.sidecarIdentity)
+        try removeHarvestedNativeDiagnostics(fs: fs, logName: path.description)
     } else { throw LauncherError.busy("Session log changed") }
+}
+
+/// ZZZ native-proxy sessions export the 3DMigoto logs beside their session log
+/// (`<stem>.d3d11_log.txt`). They go with the log, but only as plain
+/// single-link files; anything else at those names is left alone.
+package static func removeHarvestedNativeDiagnostics(fs: ContainedFileSystem, logName: String) throws {
+    guard logName.hasSuffix(".log") else { return }
+    let stem = String(logName.dropLast(".log".count))
+    for name in NativeProxyRecord.prospectiveOutputNames {
+        let export = try SafeRelativePath(NativeProxyLogHarvester.destinationName(stem: stem, name: name))
+        guard let stamp = try fs.entryStamp(at: export), stamp.kind == UInt32(S_IFREG), stamp.links == 1 else { continue }
+        try fs.removeFile(at: export)
+    }
 }
 }

@@ -134,6 +134,40 @@ struct StorageInventoryTests {
         #expect(try fs.itemType(at: SafeRelativePath("cache/GameEvents/events-index.json")) == nil)
     }
 
+    @Test func oldZZZLogCleanupTakesItsHarvestedNativeDiagnostics() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let paths = AppPaths(root: root)
+        let first = try SessionLog.create(paths: paths, game: "zzz", header: [:], now: Date(timeIntervalSince1970: 100), timeZone: .gmt, maxBytes: 4096)
+        first.finish()
+        let newest = try SessionLog.create(paths: paths, game: "zzz", header: [:], now: Date(timeIntervalSince1970: 200), timeZone: .gmt, maxBytes: 4096)
+        newest.finish()
+        func export(_ log: URL, _ name: String) -> URL {
+            log.deletingLastPathComponent().appendingPathComponent(
+                NativeProxyLogHarvester.destinationName(stem: log.deletingPathExtension().lastPathComponent, name: name))
+        }
+        let oldLog = export(first.url, "d3d11_log.txt"), oldUsage = export(first.url, "ShaderUsage.txt")
+        let keptLog = export(newest.url, "d3d11_log.txt")
+        try Data("old".utf8).write(to: oldLog)
+        try Data("usage".utf8).write(to: oldUsage)
+        try Data("new".utf8).write(to: keptLog)
+        // A link at an export name is not ours to remove.
+        let outside = root.appendingPathComponent("outside.txt")
+        try Data("outside".utf8).write(to: outside)
+        try FileManager.default.removeItem(at: oldUsage)
+        try FileManager.default.createSymbolicLink(at: oldUsage, withDestinationURL: outside)
+        let service = StorageInventory(paths: paths)
+        let context = StorageContext(region: .global, cacheDirectory: root.appendingPathComponent("cache"))
+        let log = try #require(try await service.refresh(context).candidates.first { $0.kind == .oldSessionLog })
+        try await service.cleanUp(log, context: context)
+        #expect(!FileManager.default.fileExists(atPath: first.url.path))
+        #expect(!FileManager.default.fileExists(atPath: oldLog.path))
+        #expect((try? FileManager.default.destinationOfSymbolicLink(atPath: oldUsage.path)) != nil)
+        #expect(FileManager.default.fileExists(atPath: outside.path))
+        #expect(FileManager.default.fileExists(atPath: keptLog.path))
+    }
+
     @Test func runtimeCandidatesRespectSelectionRollbackPinsAndLivePins() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
